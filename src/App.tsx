@@ -38,6 +38,7 @@ interface Player {
   name: string;
   color: string;
   skin: string;
+  team?: number;
 }
 
 const SKINS: Record<string, { name: string, color: string, pattern?: string, price: number }> = {
@@ -72,7 +73,7 @@ export default function App() {
   const [bullets, setBullets] = useState<Bullet[]>([]);
   const [obstacles, setObstacles] = useState<Obstacle[]>([]);
   const [gameState, setGameState] = useState<"lobby" | "playing">("lobby");
-  const [gameMode, setGameMode] = useState<"practice" | "showdown">("practice");
+  const [gameMode, setGameMode] = useState<"practice" | "showdown" | "duel" | "brawlball" | "knockout">("practice");
   const [gameStarted, setGameStarted] = useState(false);
   const [winnerId, setWinnerId] = useState<string | null>(null);
   const [playerCount, setPlayerCount] = useState(0);
