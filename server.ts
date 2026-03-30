@@ -393,7 +393,15 @@ async function startServer() {
   }, 1000 / 30);
  // 30 FPS updates
 
+  console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode...`);
+
+  // API health check
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", mode: process.env.NODE_ENV || 'development' });
+  });
+
   if (process.env.NODE_ENV !== "production") {
+    console.log("Setting up Vite middleware...");
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -401,6 +409,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
+    console.log("Serving static files from dist...");
     const distPath = path.resolve(__dirname, "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
