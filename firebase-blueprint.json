@@ -8,20 +8,15 @@
         "uid": { "type": "string", "description": "User ID" },
         "name": { "type": "string", "description": "Player name" },
         "money": { "type": "number", "description": "Current money" },
+        "trophies": { "type": "number", "description": "Total trophies" },
         "kills": { "type": "number", "description": "Total kills" },
         "deaths": { "type": "number", "description": "Total deaths" },
         "unlockedSkins": { "type": "array", "items": { "type": "string" }, "description": "List of unlocked skins" },
         "currentSkin": { "type": "string", "description": "Currently equipped skin" },
-        "upgrades": { 
-          "type": "object", 
-          "properties": {
-            "speed": { "type": "number" },
-            "damage": { "type": "number" },
-            "maxHealth": { "type": "number" }
-          }
-        }
+        "friends": { "type": "array", "items": { "type": "string" }, "description": "List of friend UIDs" },
+        "friendRequests": { "type": "array", "items": { "type": "string" }, "description": "List of incoming friend request UIDs" }
       },
-      "required": ["uid", "name", "money", "kills", "deaths"]
+      "required": ["uid", "name", "money", "trophies", "kills", "deaths"]
     }
   },
   "firestore": {

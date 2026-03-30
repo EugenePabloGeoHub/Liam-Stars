@@ -72,10 +72,14 @@ export default function App() {
   const [bullets, setBullets] = useState<Bullet[]>([]);
   const [obstacles, setObstacles] = useState<Obstacle[]>([]);
   const [gameState, setGameState] = useState<"lobby" | "playing">("lobby");
+  const [gameMode, setGameMode] = useState<"practice" | "showdown">("practice");
+  const [gameStarted, setGameStarted] = useState(false);
+  const [winnerId, setWinnerId] = useState<string | null>(null);
+  const [playerCount, setPlayerCount] = useState(0);
   const [playerName, setPlayerName] = useState("");
   const [roomId, setRoomId] = useState("");
   const [showShop, setShowShop] = useState(false);
-  const [shopTab, setShopTab] = useState<"upgrades" | "skins" | "packs">("upgrades");
+  const [shopTab, setShopTab] = useState<"skins" | "packs">("skins");
   const [killNotify, setKillNotify] = useState<string | null>(null);
   const [mapDim, setMapDim] = useState({ w: 1200, h: 800 });
   const shakeRef = useRef(0);
@@ -88,13 +92,22 @@ export default function App() {
   const [deaths, setDeaths] = useState(0);
   const [unlockedSkins, setUnlockedSkins] = useState<string[]>(["default"]);
   const [currentSkin, setCurrentSkin] = useState("default");
-  const [upgrades, setUpgrades] = useState({ speed: 3.5, damage: 10, maxHealth: 100 });
   const [isDead, setIsDead] = useState(false);
+  const [trophies, setTrophies] = useState(0);
+  const [friends, setFriends] = useState<string[]>([]);
+  const [friendRequests, setFriendRequests] = useState<string[]>([]);
+  const [showFriends, setShowFriends] = useState(false);
+  const [friendSearch, setFriendSearch] = useState("");
 
-  const statsRef = useRef({ money, kills, deaths });
+  const [ball, setBall] = useState<{ x: number, y: number } | null>(null);
+  const [scores, setScores] = useState({ team1: 0, team2: 0 });
+
+  const statsRef = useRef({ money, kills, deaths, trophies });
+  const lastSavedStats = useRef({ money, kills, deaths, trophies });
+
   useEffect(() => {
-    statsRef.current = { money, kills, deaths };
-  }, [money, kills, deaths]);
+    statsRef.current = { money, kills, deaths, trophies };
+  }, [money, kills, deaths, trophies]);
 
   // Auth Listener
   useEffect(() => {
@@ -106,26 +119,37 @@ export default function App() {
         if (userDoc.exists()) {
           const data = userDoc.data();
           setMoney(data.money || 0);
+          setTrophies(data.trophies || 0);
           setKills(data.kills || 0);
           setDeaths(data.deaths || 0);
           setUnlockedSkins(data.unlockedSkins || ["default"]);
           setCurrentSkin(data.currentSkin || "default");
-          setUpgrades(data.upgrades || { speed: 3.5, damage: 10, maxHealth: 100 });
+          setFriends(data.friends || []);
+          setFriendRequests(data.friendRequests || []);
           setPlayerName(data.name || u.displayName || "Brawler");
+          lastSavedStats.current = { 
+            money: data.money || 0, 
+            trophies: data.trophies || 0, 
+            kills: data.kills || 0, 
+            deaths: data.deaths || 0 
+          };
         } else {
           // Create Profile
           const initialData = {
             uid: u.uid,
             name: u.displayName || "Brawler",
             money: 0,
+            trophies: 0,
             kills: 0,
             deaths: 0,
             unlockedSkins: ["default"],
             currentSkin: "default",
-            upgrades: { speed: 3.5, damage: 10, maxHealth: 100 }
+            friends: [],
+            friendRequests: []
           };
           await setDoc(doc(db, "users", u.uid), initialData);
           setPlayerName(initialData.name);
+          lastSavedStats.current = { money: 0, trophies: 0, kills: 0, deaths: 0 };
         }
       }
       setLoading(false);
@@ -136,10 +160,20 @@ export default function App() {
   // Save Progress to Firestore
   const saveProgress = async (updates: any) => {
     if (!user) return;
+    
+    // Optimistically update lastSavedStats to prevent redundant triggers
+    if (updates.money !== undefined) lastSavedStats.current.money = updates.money;
+    if (updates.trophies !== undefined) lastSavedStats.current.trophies = updates.trophies;
+    if (updates.kills !== undefined) lastSavedStats.current.kills = updates.kills;
+    if (updates.deaths !== undefined) lastSavedStats.current.deaths = updates.deaths;
+
     try {
+      console.log("Saving progress to Firebase:", updates);
       await updateDoc(doc(db, "users", user.uid), updates);
+      console.log("Progress saved successfully");
     } catch (e) {
       console.error("Error saving progress:", e);
+      // Rollback on error if needed, but for stats we usually just wait for next update
     }
   };
 
@@ -191,23 +225,25 @@ export default function App() {
     };
   }, [gameState]);
 
-  const connect = () => {
+  const connect = (mode: string = "practice") => {
+    setGameMode(mode as any);
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${window.location.host}`);
     socketRef.current = socket;
 
     socket.onopen = () => {
       socket.send(JSON.stringify({ 
-        type: "JOIN_ROOM", 
+        type: "JOIN_QUEUE", 
+        mode,
         roomId: roomId || "default", 
         name: playerName || "Brawler",
         stats: {
           money,
+          trophies,
           kills,
           deaths,
           skin: currentSkin,
-          color: SKINS[currentSkin].color,
-          ...upgrades
+          color: SKINS[currentSkin].color
         }
       }));
     };
@@ -221,33 +257,48 @@ export default function App() {
         localPos.current = { x: data.x, y: data.y };
         setGameState("playing");
         setIsDead(false);
+        setWinnerId(null);
+        setGameStarted(data.mode === "practice");
       } else if (data.type === "STATE") {
+        setGameStarted(data.started);
+        setWinnerId(data.winner);
+        setPlayerCount(data.playerCount || 0);
+        setBall(data.ball);
+        setScores(data.scores || { team1: 0, team2: 0 });
+        
         const currentStats = statsRef.current;
         if (playerId && data.players[playerId]) {
           const oldP = players[playerId];
           const newP = data.players[playerId];
           
           // Update local persistence
-          if (newP.money !== currentStats.money) {
+          if (newP.money !== lastSavedStats.current.money) {
             setMoney(newP.money);
             saveProgress({ money: newP.money });
           }
-          if (newP.kills > currentStats.kills) {
+          if (newP.trophies !== lastSavedStats.current.trophies) {
+            setTrophies(newP.trophies);
+            saveProgress({ trophies: newP.trophies });
+          }
+          if (newP.kills > lastSavedStats.current.kills) {
             setKills(newP.kills);
             saveProgress({ kills: newP.kills });
             setKillNotify("YOU GOT A KILL!");
             playSound(800, "square", 0.3);
             setTimeout(() => setKillNotify(null), 2000);
           }
-          if (newP.deaths > currentStats.deaths || newP.health <= 0) {
-            if (newP.deaths > currentStats.deaths) {
-              setDeaths(newP.deaths);
-              saveProgress({ deaths: newP.deaths });
-            }
+          
+          // "Dying doesn't work" - we just track it for stats but don't trigger the death screen automatically
+          if (newP.deaths > lastSavedStats.current.deaths) {
+            setDeaths(newP.deaths);
+            saveProgress({ deaths: newP.deaths });
+            playSound(100, "sawtooth", 0.5);
+          }
+
+          if (newP.health <= 0 && !isDead) {
             setIsDead(true);
-            if (oldP && oldP.health > 0) {
-              playSound(100, "sawtooth", 0.5);
-            }
+          } else if (newP.health > 0 && isDead) {
+            setIsDead(false);
           }
 
           if (oldP && newP.health < oldP.health) {
@@ -264,16 +315,6 @@ export default function App() {
           if (dist > 50) { // Reduced threshold for better sync
             localPos.current = { x: srvP.x, y: srvP.y };
           }
-        }
-      } else if (data.type === "UPGRADE_SUCCESS") {
-        // Sync upgrades locally
-        const p = players[playerId!];
-        if (p) {
-          setUpgrades({
-            speed: p.speed,
-            damage: p.damage,
-            maxHealth: p.maxHealth
-          });
         }
       }
     };
@@ -436,8 +477,37 @@ export default function App() {
       });
       ctx.shadowBlur = 0;
 
+      // Draw Ball
+      if (ball) {
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Ball pattern
+        ctx.beginPath();
+        ctx.moveTo(ball.x - 15, ball.y);
+        ctx.lineTo(ball.x + 15, ball.y);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(ball.x, ball.y - 15);
+        ctx.lineTo(ball.x, ball.y + 15);
+        ctx.stroke();
+      }
+
+      // Draw Goals for Brawl Ball
+      if (gameMode === "brawlball") {
+        ctx.fillStyle = "rgba(59, 130, 246, 0.2)"; // Team 1 Goal
+        ctx.fillRect(0, mapDim.h / 2 - 100, 20, 200);
+        ctx.fillStyle = "rgba(239, 68, 68, 0.2)"; // Team 2 Goal
+        ctx.fillRect(mapDim.w - 20, mapDim.h / 2 - 100, 20, 200);
+      }
+
       // Draw Players
-      (Object.values(players) as Player[]).forEach(p => {
+      (Object.values(players) as any[]).forEach(p => {
         const isLocal = p.id === playerId;
         let inBush = false;
         for (const obs of obstacles) {
@@ -464,11 +534,11 @@ export default function App() {
         // Health Bar
         ctx.fillStyle = "rgba(0,0,0,0.5)";
         ctx.fillRect(-25, -45, 50, 8);
-        ctx.fillStyle = p.health > (p.maxHealth * 0.3) ? "#4ade80" : "#f87171";
+        ctx.fillStyle = p.health > (p.maxHealth * 0.3) ? (p.team === 1 ? "#3b82f6" : (p.team === 2 ? "#ef4444" : "#4ade80")) : "#f87171";
         ctx.fillRect(-25, -45, (p.health / p.maxHealth) * 50, 8);
 
         // Name
-        ctx.fillStyle = isLocal ? "#f97316" : "#fff";
+        ctx.fillStyle = isLocal ? "#f97316" : (p.team === 1 ? "#3b82f6" : (p.team === 2 ? "#ef4444" : "#fff"));
         ctx.font = "bold 14px Inter";
         ctx.textAlign = "center";
         ctx.shadowBlur = 4;
@@ -621,26 +691,6 @@ export default function App() {
     }
   };
 
-  const upgrade = (stat: string) => {
-    if (money < 50) return;
-    
-    const newMoney = money - 50;
-    setMoney(newMoney);
-    const newUpgrades = { ...upgrades };
-    if (stat === "speed") newUpgrades.speed += 0.5;
-    if (stat === "damage") newUpgrades.damage += 2;
-    if (stat === "health") newUpgrades.maxHealth += 20;
-    
-    setUpgrades(newUpgrades);
-    saveProgress({ money: newMoney, upgrades: newUpgrades });
-
-    if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ type: "UPGRADE", stat }));
-    }
-    
-    playSound(440, "sine", 0.1);
-  };
-
   const handleMouseMove = (e: React.MouseEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (rect) {
@@ -691,6 +741,56 @@ export default function App() {
     setGameState("lobby");
     setIsDead(false);
     socketRef.current?.close();
+  };
+
+  const sendFriendRequest = async (targetUid: string) => {
+    if (!user || targetUid === user.uid) return;
+    try {
+      const targetDoc = await getDoc(doc(db, "users", targetUid));
+      if (targetDoc.exists()) {
+        const targetData = targetDoc.data();
+        const currentRequests = targetData.friendRequests || [];
+        if (!currentRequests.includes(user.uid)) {
+          await updateDoc(doc(db, "users", targetUid), {
+            friendRequests: [...currentRequests, user.uid]
+          });
+          setKillNotify("FRIEND REQUEST SENT!");
+          setTimeout(() => setKillNotify(null), 2000);
+        }
+      }
+    } catch (e) {
+      console.error("Error sending friend request:", e);
+    }
+  };
+
+  const acceptFriendRequest = async (requestUid: string) => {
+    if (!user) return;
+    try {
+      const newRequests = friendRequests.filter(id => id !== requestUid);
+      const newFriends = [...friends, requestUid];
+      
+      // Update my profile
+      await updateDoc(doc(db, "users", user.uid), {
+        friendRequests: newRequests,
+        friends: newFriends
+      });
+      setFriendRequests(newRequests);
+      setFriends(newFriends);
+
+      // Update their profile
+      const otherDoc = await getDoc(doc(db, "users", requestUid));
+      if (otherDoc.exists()) {
+        const otherFriends = otherDoc.data().friends || [];
+        await updateDoc(doc(db, "users", requestUid), {
+          friends: [...otherFriends, user.uid]
+        });
+      }
+      
+      setKillNotify("FRIEND ADDED!");
+      setTimeout(() => setKillNotify(null), 2000);
+    } catch (e) {
+      console.error("Error accepting friend request:", e);
+    }
   };
 
   const currentPlayer = playerId ? players[playerId] : null;
@@ -777,8 +877,11 @@ export default function App() {
                       <p className="text-2xl font-black">{deaths}</p>
                     </div>
                     <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">K/D Ratio</p>
-                      <p className="text-2xl font-black text-orange-500">{(kills / (deaths || 1)).toFixed(2)}</p>
+                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Trophies</p>
+                      <p className="text-2xl font-black text-orange-500 flex items-center gap-2">
+                        <Trophy className="w-5 h-5" />
+                        {trophies}
+                      </p>
                     </div>
                     <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
                       <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Balance</p>
@@ -789,29 +892,20 @@ export default function App() {
               </div>
 
               <div className="bg-[#0f0f0f] border border-[#222] p-8 rounded-[2.5rem] shadow-2xl">
-                <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-6">Equipped Upgrades</h3>
+                <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-6">Friends</h3>
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <Zap className="w-4 h-4 text-blue-400" />
-                      <span className="text-xs font-bold uppercase tracking-tight">Speed</span>
+                  <button 
+                    onClick={() => setShowFriends(true)}
+                    className="w-full bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all"
+                  >
+                    <Users className="w-5 h-5" />
+                    Manage Friends ({friends.length})
+                  </button>
+                  {friendRequests.length > 0 && (
+                    <div className="bg-orange-500/10 border border-orange-500/20 p-4 rounded-2xl text-center">
+                      <p className="text-xs font-bold text-orange-200">{friendRequests.length} New Friend Requests!</p>
                     </div>
-                    <span className="font-black text-blue-400">Lv. {Math.round((upgrades.speed - 3.5) / 0.5) + 1}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <Sword className="w-4 h-4 text-red-400" />
-                      <span className="text-xs font-bold uppercase tracking-tight">Damage</span>
-                    </div>
-                    <span className="font-black text-red-400">Lv. {Math.round((upgrades.damage - 10) / 2) + 1}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <Shield className="w-4 h-4 text-green-400" />
-                      <span className="text-xs font-bold uppercase tracking-tight">Health</span>
-                    </div>
-                    <span className="font-black text-green-400">Lv. {Math.round((upgrades.maxHealth - 100) / 20) + 1}</span>
-                  </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -837,18 +931,44 @@ export default function App() {
                     placeholder="Join Room ID (Optional)"
                     className="w-full bg-[#050505] border border-[#222] rounded-2xl px-6 py-4 focus:outline-none focus:border-orange-500 transition-all placeholder:text-gray-700 text-sm font-bold"
                   />
+                <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={connect}
-                    className="w-full bg-orange-500 hover:bg-orange-600 text-white font-black py-6 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-xl shadow-orange-500/30 uppercase italic tracking-tight text-3xl"
+                    onClick={() => connect("practice")}
+                    className="bg-white text-black font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] uppercase italic tracking-tight text-xl"
                   >
-                    Play Now
+                    Practice
                   </button>
                   <button
-                    onClick={() => { setShopTab("upgrades"); setShowShop(true); }}
-                    className="w-full bg-white/5 hover:bg-white/10 text-white font-black py-4 rounded-2xl transition-all uppercase italic tracking-tight text-sm border border-white/5"
+                    onClick={() => connect("showdown")}
+                    className="bg-orange-500 hover:bg-orange-600 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-orange-500/20 uppercase italic tracking-tight text-xl"
                   >
-                    Open Shop
+                    Showdown
                   </button>
+                  <button
+                    onClick={() => connect("duel")}
+                    className="bg-purple-600 hover:bg-purple-700 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-purple-500/20 uppercase italic tracking-tight text-xl"
+                  >
+                    1v1 Duel
+                  </button>
+                  <button
+                    onClick={() => connect("brawlball")}
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-blue-500/20 uppercase italic tracking-tight text-xl"
+                  >
+                    Brawl Ball
+                  </button>
+                  <button
+                    onClick={() => connect("knockout")}
+                    className="bg-red-600 hover:bg-red-700 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-red-500/20 uppercase italic tracking-tight text-xl col-span-2"
+                  >
+                    Knockout
+                  </button>
+                </div>
+                <button
+                  onClick={() => { setShopTab("skins"); setShowShop(true); }}
+                  className="w-full bg-white/5 hover:bg-white/10 text-white font-black py-4 rounded-2xl transition-all uppercase italic tracking-tight text-sm border border-white/5"
+                >
+                  Open Shop
+                </button>
                 </div>
               </div>
 
@@ -888,7 +1008,26 @@ export default function App() {
             {/* HUD */}
             <div className="absolute top-6 left-6 right-6 flex justify-between items-start pointer-events-none">
               <div className="flex flex-col gap-4">
-                <div className="bg-black/80 backdrop-blur-xl border border-white/5 p-4 rounded-2xl flex items-center gap-4 shadow-2xl">
+                {gameMode === "brawlball" && (
+                  <div className="bg-black/80 backdrop-blur-xl border border-white/5 p-4 rounded-2xl flex items-center gap-6 shadow-2xl pointer-events-auto mb-2">
+                    <div className="text-center">
+                      <p className="text-[8px] font-bold text-blue-400 uppercase tracking-widest">Blue</p>
+                      <p className="text-2xl font-black text-white leading-none">{scores.team1}</p>
+                    </div>
+                    <div className="w-px h-8 bg-white/10" />
+                    <div className="text-center">
+                      <p className="text-[8px] font-bold text-red-400 uppercase tracking-widest">Red</p>
+                      <p className="text-2xl font-black text-white leading-none">{scores.team2}</p>
+                    </div>
+                  </div>
+                )}
+                <div className="bg-black/80 backdrop-blur-xl border border-white/5 p-4 rounded-2xl flex items-center gap-4 shadow-2xl pointer-events-auto">
+                  <button 
+                    onClick={handleBackToMenu}
+                    className="p-2 hover:bg-white/10 rounded-lg transition-colors text-gray-400 hover:text-white"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                   <div className="w-10 h-10 rounded-xl" style={{ backgroundColor: currentPlayer?.color }} />
                   <div>
                     <h3 className="font-black uppercase italic tracking-tight leading-none">{currentPlayer?.name}</h3>
@@ -970,36 +1109,119 @@ export default function App() {
               </div>
             </div>
 
-            {/* Death Screen */}
+            {/* Matchmaking Overlay */}
             <AnimatePresence>
-              {isDead && (
+              {gameMode !== "practice" && !gameStarted && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  className="absolute inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-md"
+                  className="absolute inset-0 z-[70] flex items-center justify-center bg-black/90 backdrop-blur-xl"
                 >
                   <div className="text-center space-y-8">
+                    <div className="relative w-32 h-32 mx-auto">
+                      <motion.div 
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                        className="absolute inset-0 border-4 border-orange-500 border-t-transparent rounded-full"
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <Users className="w-12 h-12 text-orange-500" />
+                      </div>
+                    </div>
+                    <div>
+                      <h2 className="text-5xl font-black uppercase italic tracking-tighter text-white">Matchmaking</h2>
+                      <p className="text-orange-500 font-bold uppercase tracking-[0.3em] mt-2">
+                        {gameMode === "duel" ? "Waiting for 2 players..." : 
+                         gameMode === "showdown" ? "Waiting for 10 players..." : 
+                         "Waiting for 6 players..."}
+                      </p>
+                    </div>
+                    <div className="bg-white/5 border border-white/10 px-8 py-4 rounded-2xl">
+                      <p className="text-2xl font-black">
+                        {playerCount} / {gameMode === "duel" ? 2 : gameMode === "showdown" ? 10 : 6}
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleBackToMenu}
+                      className="px-8 py-4 bg-white/10 hover:bg-white/20 text-white font-black rounded-xl uppercase italic tracking-tight transition-all"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Winner Screen */}
+            <AnimatePresence>
+              {winnerId && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="absolute inset-0 z-[80] flex items-center justify-center bg-orange-500/20 backdrop-blur-xl"
+                >
+                  <div className="text-center space-y-6 p-12 bg-black/80 rounded-[3rem] border border-orange-500/30 shadow-[0_0_50px_rgba(249,115,22,0.3)]">
+                    <Trophy className="w-24 h-24 text-yellow-400 mx-auto animate-bounce" />
+                    <h2 className="text-7xl font-black uppercase italic tracking-tighter text-white">
+                      {(winnerId === playerId || (currentPlayer && ((winnerId === "team1" && currentPlayer.team === 1) || (winnerId === "team2" && currentPlayer.team === 2)))) ? "VICTORY!" : "GAME OVER"}
+                    </h2>
+                    <p className="text-orange-500 font-bold uppercase tracking-[0.3em] mb-4">
+                      {winnerId.startsWith("team") ? (winnerId === "team1" ? "Blue Team Wins!" : "Red Team Wins!") : `${players[winnerId]?.name} is the winner!`}
+                    </p>
+                    {(winnerId === playerId || (currentPlayer && ((winnerId === "team1" && currentPlayer.team === 1) || (winnerId === "team2" && currentPlayer.team === 2)))) && (
+                      <div className="bg-orange-500/20 border border-orange-500/30 p-4 rounded-2xl inline-flex items-center gap-3">
+                        <Trophy className="w-6 h-6 text-yellow-400" />
+                        <span className="text-2xl font-black text-white">+10 Trophies</span>
+                      </div>
+                    )}
+                    <div className="pt-8">
+                      <button
+                        onClick={handleBackToMenu}
+                        className="px-12 py-5 bg-orange-500 text-white font-black rounded-2xl uppercase italic tracking-tight text-xl hover:bg-orange-600 transition-all shadow-lg"
+                      >
+                        Back to Menu
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Death Screen (Modified for "No Death") */}
+            <AnimatePresence>
+              {isDead && !winnerId && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute inset-0 z-[60] flex items-center justify-center bg-red-900/20 backdrop-blur-sm pointer-events-none"
+                >
+                  <div className="text-center space-y-4 pointer-events-auto">
                     <motion.h2 
                       initial={{ y: 20, opacity: 0 }}
                       animate={{ y: 0, opacity: 1 }}
-                      className="text-7xl font-black uppercase italic tracking-tighter text-red-500 drop-shadow-[0_0_30px_rgba(239,68,68,0.5)]"
+                      className="text-6xl font-black uppercase italic tracking-tighter text-red-500 drop-shadow-[0_0_20px_rgba(239,68,68,0.5)]"
                     >
                       Brawler Down!
                     </motion.h2>
-                    <p className="text-gray-400 font-bold uppercase tracking-[0.3em] mb-8">You were eliminated in battle</p>
+                    <p className="text-white/80 font-bold uppercase tracking-[0.3em] mb-8">You are at 0 health!</p>
                     <div className="flex gap-4 justify-center">
-                      <button
-                        onClick={handleRespawn}
-                        className="px-12 py-5 bg-white text-black font-black rounded-2xl uppercase italic tracking-tight text-xl hover:bg-gray-200 transition-all transform hover:scale-105 shadow-[0_0_20px_rgba(255,255,255,0.2)]"
-                      >
-                        Respawn
-                      </button>
+                      {(gameMode === "practice" || gameMode === "brawlball") ? (
+                        <button
+                          onClick={handleRespawn}
+                          className="px-10 py-4 bg-white text-black font-black rounded-2xl uppercase italic tracking-tight text-lg hover:bg-gray-200 transition-all shadow-xl"
+                        >
+                          Respawn
+                        </button>
+                      ) : (
+                        <p className="text-red-400 font-black uppercase italic">Wait for game to end or leave</p>
+                      )}
                       <button
                         onClick={handleBackToMenu}
-                        className="px-12 py-5 bg-white/10 border border-white/10 text-white font-black rounded-2xl uppercase italic tracking-tight text-xl hover:bg-white/20 transition-all"
+                        className="px-10 py-4 bg-white/10 border border-white/10 text-white font-black rounded-2xl uppercase italic tracking-tight text-lg hover:bg-white/20 transition-all"
                       >
-                        Main Menu
+                        Back to Menu
                       </button>
                     </div>
                   </div>
@@ -1049,7 +1271,7 @@ export default function App() {
               </div>
 
               <div className="flex gap-2 mb-8 bg-black/40 p-1.5 rounded-2xl border border-white/5">
-                {(["upgrades", "skins", "packs"] as const).map((tab) => (
+                {(["skins", "packs"] as const).map((tab) => (
                   <button
                     key={tab}
                     onClick={() => setShopTab(tab)}
@@ -1063,61 +1285,6 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar min-h-[300px]">
-                {shopTab === "upgrades" && (
-                  <div className="grid grid-cols-1 gap-4">
-                    <button 
-                      onClick={() => upgrade("speed")}
-                      disabled={money < 50}
-                      className="group flex items-center justify-between p-6 bg-[#151515] hover:bg-[#1a1a1a] border border-[#222] rounded-2xl transition-all disabled:opacity-50"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="p-3 bg-blue-500/20 rounded-xl group-hover:bg-blue-500/30 transition-colors">
-                          <Zap className="w-6 h-6 text-blue-400" />
-                        </div>
-                        <div className="text-left">
-                          <h4 className="font-black uppercase italic tracking-tight">Speed Boost</h4>
-                          <p className="text-[10px] text-gray-500 font-bold uppercase">Level Up your mobility</p>
-                        </div>
-                      </div>
-                      <span className="font-black text-xl text-yellow-400">$50</span>
-                    </button>
-
-                    <button 
-                      onClick={() => upgrade("damage")}
-                      disabled={money < 50}
-                      className="group flex items-center justify-between p-6 bg-[#151515] hover:bg-[#1a1a1a] border border-[#222] rounded-2xl transition-all disabled:opacity-50"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="p-3 bg-red-500/20 rounded-xl group-hover:bg-red-500/30 transition-colors">
-                          <Sword className="w-6 h-6 text-red-400" />
-                        </div>
-                        <div className="text-left">
-                          <h4 className="font-black uppercase italic tracking-tight">Attack Power</h4>
-                          <p className="text-[10px] text-gray-500 font-bold uppercase">Increase bullet damage</p>
-                        </div>
-                      </div>
-                      <span className="font-black text-xl text-yellow-400">$50</span>
-                    </button>
-
-                    <button 
-                      onClick={() => upgrade("health")}
-                      disabled={money < 50}
-                      className="group flex items-center justify-between p-6 bg-[#151515] hover:bg-[#1a1a1a] border border-[#222] rounded-2xl transition-all disabled:opacity-50"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="p-3 bg-green-500/20 rounded-xl group-hover:bg-green-500/30 transition-colors">
-                          <Shield className="w-6 h-6 text-green-400" />
-                        </div>
-                        <div className="text-left">
-                          <h4 className="font-black uppercase italic tracking-tight">Max Health</h4>
-                          <p className="text-[10px] text-gray-500 font-bold uppercase">Boost your survivability</p>
-                        </div>
-                      </div>
-                      <span className="font-black text-xl text-yellow-400">$50</span>
-                    </button>
-                  </div>
-                )}
-
                 {shopTab === "skins" && (
                   <div className="grid grid-cols-2 gap-4">
                     {Object.entries(SKINS).map(([id, skin]) => (
@@ -1173,6 +1340,91 @@ export default function App() {
               >
                 Close Shop
               </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {/* Friends Overlay */}
+      <AnimatePresence>
+        {showFriends && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-[#0f0f0f] border border-[#222] p-8 md:p-10 rounded-[3rem] shadow-3xl w-full max-w-md overflow-hidden flex flex-col"
+            >
+              <div className="flex justify-between items-center mb-8">
+                <div>
+                  <h2 className="text-3xl font-black uppercase italic tracking-tighter">Friends</h2>
+                  <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">{friends.length} Friends</p>
+                </div>
+                <button onClick={() => setShowFriends(false)} className="p-4 bg-white/5 hover:bg-white/10 rounded-2xl transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                <div>
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">Add Friend</h3>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text"
+                      value={friendSearch}
+                      onChange={(e) => setFriendSearch(e.target.value)}
+                      placeholder="Enter User ID"
+                      className="flex-1 bg-black/40 border border-white/5 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500 transition-all text-sm"
+                    />
+                    <button 
+                      onClick={() => { sendFriendRequest(friendSearch); setFriendSearch(""); }}
+                      className="p-3 bg-orange-500 rounded-xl hover:bg-orange-600 transition-all"
+                    >
+                      <Plus className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+
+                {friendRequests.length > 0 && (
+                  <div>
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 mb-4">Pending Requests</h3>
+                    <div className="space-y-2">
+                      {friendRequests.map(reqId => (
+                        <div key={reqId} className="bg-white/5 p-4 rounded-2xl flex items-center justify-between border border-white/5">
+                          <span className="text-xs font-bold text-gray-400 truncate max-w-[150px]">{reqId}</span>
+                          <button 
+                            onClick={() => acceptFriendRequest(reqId)}
+                            className="bg-orange-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase italic tracking-tight hover:bg-orange-600 transition-all"
+                          >
+                            Accept
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">Your Friends</h3>
+                  {friends.length === 0 ? (
+                    <p className="text-center text-gray-600 text-xs py-8">No friends yet. Add some!</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {friends.map(fId => (
+                        <div key={fId} className="bg-white/5 p-4 rounded-2xl flex items-center gap-4 border border-white/5">
+                          <div className="w-10 h-10 bg-gray-800 rounded-lg flex items-center justify-center">
+                            <User className="w-5 h-5 text-gray-600" />
+                          </div>
+                          <span className="text-sm font-bold truncate">{fId}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             </motion.div>
           </motion.div>
         )}
