@@ -3,24 +3,35 @@ import { motion, AnimatePresence } from "motion/react";
 import { 
   Sword, 
   Target, 
-  Users, 
   Zap, 
   Shield, 
   Trophy, 
-  Coins, 
-  Palette, 
-  Package, 
   X, 
   Play, 
   ChevronRight, 
   User, 
   Plus,
+  Settings,
+  Gamepad2,
+  Flame,
+  Crown,
+  Users,
+  Search,
+  UserPlus,
   LogOut,
-  LogIn
+  Bell
 } from "lucide-react";
-import { auth, db } from "./firebase";
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User as FirebaseUser } from "firebase/auth";
-import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
+
+interface PartyMember {
+  id: string;
+  name: string;
+}
+
+interface Party {
+  id: string;
+  leaderId: string;
+  members: PartyMember[];
+}
 
 interface Player {
   id: string;
@@ -28,26 +39,25 @@ interface Player {
   y: number;
   health: number;
   maxHealth: number;
-  money: number;
-  kills: number;
-  deaths: number;
   damage: number;
   speed: number;
   superCharge: number;
   angle: number;
   name: string;
   color: string;
-  skin: string;
   team?: number;
 }
 
-const SKINS: Record<string, { name: string, color: string, pattern?: string, price: number }> = {
-  default: { name: "Classic", color: "#3b82f6", price: 0 },
-  tiger: { name: "Tiger", color: "#f59e0b", pattern: "stripe", price: 200 },
-  neon: { name: "Neon", color: "#10b981", pattern: "glow", price: 500 },
-  gold: { name: "Royal Gold", color: "#fbbf24", pattern: "shine", price: 1000 },
-  void: { name: "Void", color: "#8b5cf6", pattern: "pulse", price: 2000 },
-};
+const PLAYER_COLORS = [
+  "#ef4444", // Red
+  "#3b82f6", // Blue
+  "#10b981", // Green
+  "#f59e0b", // Amber
+  "#8b5cf6", // Violet
+  "#ec4899", // Pink
+  "#06b6d4", // Cyan
+  "#f97316", // Orange
+];
 
 interface Obstacle {
   x: number;
@@ -62,6 +72,7 @@ interface Bullet {
   ownerId: string;
   x: number;
   y: number;
+  angle: number;
   isSuper: boolean;
 }
 
@@ -69,6 +80,13 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const [playerId, setPlayerId] = useState<string | null>(null);
+  const [persistentId] = useState(() => {
+    const saved = localStorage.getItem("persistentId");
+    if (saved) return saved;
+    const newId = Math.random().toString(36).substring(2, 15);
+    localStorage.setItem("persistentId", newId);
+    return newId;
+  });
   const [players, setPlayers] = useState<Record<string, Player>>({});
   const [bullets, setBullets] = useState<Bullet[]>([]);
   const [obstacles, setObstacles] = useState<Obstacle[]>([]);
@@ -77,117 +95,87 @@ export default function App() {
   const [gameStarted, setGameStarted] = useState(false);
   const [winnerId, setWinnerId] = useState<string | null>(null);
   const [playerCount, setPlayerCount] = useState(0);
-  const [playerName, setPlayerName] = useState("");
+  const [playerName, setPlayerName] = useState(() => localStorage.getItem("playerName") || "Brawler_" + Math.floor(Math.random() * 1000));
   const [roomId, setRoomId] = useState("");
-  const [showShop, setShowShop] = useState(false);
-  const [shopTab, setShopTab] = useState<"skins" | "packs">("skins");
-  const [killNotify, setKillNotify] = useState<string | null>(null);
   const [mapDim, setMapDim] = useState({ w: 1200, h: 800 });
   const shakeRef = useRef(0);
 
-  // Firebase Auth & Persistence State
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [money, setMoney] = useState(0);
-  const [kills, setKills] = useState(0);
-  const [deaths, setDeaths] = useState(0);
-  const [unlockedSkins, setUnlockedSkins] = useState<string[]>(["default"]);
-  const [currentSkin, setCurrentSkin] = useState("default");
   const [isDead, setIsDead] = useState(false);
-  const [trophies, setTrophies] = useState(0);
-  const [friends, setFriends] = useState<string[]>([]);
-  const [friendRequests, setFriendRequests] = useState<string[]>([]);
-  const [showFriends, setShowFriends] = useState(false);
-  const [friendSearch, setFriendSearch] = useState("");
 
   const [ball, setBall] = useState<{ x: number, y: number } | null>(null);
   const [scores, setScores] = useState({ team1: 0, team2: 0 });
 
-  const statsRef = useRef({ money, kills, deaths, trophies });
-  const lastSavedStats = useRef({ money, kills, deaths, trophies });
+  // Lobby & Party State
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<{ id: string, name: string }[]>([]);
+  const [party, setParty] = useState<Party | null>(null);
+  const [invites, setInvites] = useState<{ fromId: string, fromName: string }[]>([]);
+  const lobbySocketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    statsRef.current = { money, kills, deaths, trophies };
-  }, [money, kills, deaths, trophies]);
+    localStorage.setItem("playerName", playerName);
+    if (gameState === "lobby") {
+      connectLobby();
+    }
+    return () => lobbySocketRef.current?.close();
+  }, [playerName, gameState]);
 
-  // Auth Listener
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      if (u) {
-        // Load Profile
-        const userDoc = await getDoc(doc(db, "users", u.uid));
-        if (userDoc.exists()) {
-          const data = userDoc.data();
-          setMoney(data.money || 0);
-          setTrophies(data.trophies || 0);
-          setKills(data.kills || 0);
-          setDeaths(data.deaths || 0);
-          setUnlockedSkins(data.unlockedSkins || ["default"]);
-          setCurrentSkin(data.currentSkin || "default");
-          setFriends(data.friends || []);
-          setFriendRequests(data.friendRequests || []);
-          setPlayerName(data.name || u.displayName || "Brawler");
-          lastSavedStats.current = { 
-            money: data.money || 0, 
-            trophies: data.trophies || 0, 
-            kills: data.kills || 0, 
-            deaths: data.deaths || 0 
-          };
-        } else {
-          // Create Profile
-          const initialData = {
-            uid: u.uid,
-            name: u.displayName || "Brawler",
-            money: 0,
-            trophies: 0,
-            kills: 0,
-            deaths: 0,
-            unlockedSkins: ["default"],
-            currentSkin: "default",
-            friends: [],
-            friendRequests: []
-          };
-          await setDoc(doc(db, "users", u.uid), initialData);
-          setPlayerName(initialData.name);
-          lastSavedStats.current = { money: 0, trophies: 0, kills: 0, deaths: 0 };
-        }
+  const connectLobby = () => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${window.location.host}`);
+    lobbySocketRef.current = socket;
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ type: "LOBBY_JOIN", name: playerName, playerId: persistentId }));
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      switch (data.type) {
+        case "SEARCH_RESULTS":
+          setSearchResults(data.results);
+          break;
+        case "PARTY_INVITE_RECEIVED":
+          setInvites(prev => [...prev, { fromId: data.fromId, fromName: data.fromName }]);
+          playSound(600, "sine", 0.2);
+          break;
+        case "PARTY_UPDATE":
+          setParty(data.party);
+          break;
+        case "GAME_START_REQUEST":
+          setRoomId(data.roomId);
+          connect(data.mode, data.roomId);
+          break;
       }
-      setLoading(false);
-    });
-    return unsubscribe;
-  }, []);
+    };
+  };
 
-  // Save Progress to Firestore
-  const saveProgress = async (updates: any) => {
-    if (!user) return;
-    
-    // Optimistically update lastSavedStats to prevent redundant triggers
-    if (updates.money !== undefined) lastSavedStats.current.money = updates.money;
-    if (updates.trophies !== undefined) lastSavedStats.current.trophies = updates.trophies;
-    if (updates.kills !== undefined) lastSavedStats.current.kills = updates.kills;
-    if (updates.deaths !== undefined) lastSavedStats.current.deaths = updates.deaths;
-
-    try {
-      console.log("Saving progress to Firebase:", updates);
-      await updateDoc(doc(db, "users", user.uid), updates);
-      console.log("Progress saved successfully");
-    } catch (e) {
-      console.error("Error saving progress:", e);
-      // Rollback on error if needed, but for stats we usually just wait for next update
+  const searchPlayers = (query: string) => {
+    setSearchQuery(query);
+    if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
+      lobbySocketRef.current.send(JSON.stringify({ type: "SEARCH_PLAYERS", query, playerId: persistentId }));
     }
   };
 
-  const handleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-    } catch (e) {
-      console.error("Login failed:", e);
+  const invitePlayer = (targetId: string) => {
+    if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
+      lobbySocketRef.current.send(JSON.stringify({ type: "PARTY_INVITE", targetId, playerId: persistentId }));
     }
   };
 
-  const handleLogout = () => signOut(auth);
+  const acceptInvite = (fromId: string) => {
+    if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
+      lobbySocketRef.current.send(JSON.stringify({ type: "PARTY_ACCEPT", fromId, playerId: persistentId }));
+      setInvites(prev => prev.filter(i => i.fromId !== fromId));
+    }
+  };
+
+  const leaveParty = () => {
+    if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
+      lobbySocketRef.current.send(JSON.stringify({ type: "PARTY_LEAVE", playerId: persistentId }));
+    }
+    setParty(null);
+  };
 
   const playSound = (freq: number, type: OscillatorType = "square", duration: number = 0.1) => {
     try {
@@ -226,7 +214,7 @@ export default function App() {
     };
   }, [gameState]);
 
-  const connect = (mode: string = "practice") => {
+  const connect = (mode: string = "practice", specificRoomId?: string) => {
     setGameMode(mode as any);
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${window.location.host}`);
@@ -236,15 +224,12 @@ export default function App() {
       socket.send(JSON.stringify({ 
         type: "JOIN_QUEUE", 
         mode,
-        roomId: roomId || "default", 
+        roomId: specificRoomId || roomId || "default", 
         name: playerName || "Brawler",
+        playerId: persistentId,
+        partyId: party?.id,
         stats: {
-          money,
-          trophies,
-          kills,
-          deaths,
-          skin: currentSkin,
-          color: SKINS[currentSkin].color
+          color: PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)]
         }
       }));
     };
@@ -267,35 +252,10 @@ export default function App() {
         setBall(data.ball);
         setScores(data.scores || { team1: 0, team2: 0 });
         
-        const currentStats = statsRef.current;
         if (playerId && data.players[playerId]) {
           const oldP = players[playerId];
           const newP = data.players[playerId];
           
-          // Update local persistence
-          if (newP.money !== lastSavedStats.current.money) {
-            setMoney(newP.money);
-            saveProgress({ money: newP.money });
-          }
-          if (newP.trophies !== lastSavedStats.current.trophies) {
-            setTrophies(newP.trophies);
-            saveProgress({ trophies: newP.trophies });
-          }
-          if (newP.kills > lastSavedStats.current.kills) {
-            setKills(newP.kills);
-            saveProgress({ kills: newP.kills });
-            setKillNotify("YOU GOT A KILL!");
-            playSound(800, "square", 0.3);
-            setTimeout(() => setKillNotify(null), 2000);
-          }
-          
-          // "Dying doesn't work" - we just track it for stats but don't trigger the death screen automatically
-          if (newP.deaths > lastSavedStats.current.deaths) {
-            setDeaths(newP.deaths);
-            saveProgress({ deaths: newP.deaths });
-            playSound(100, "sawtooth", 0.5);
-          }
-
           if (newP.health <= 0 && !isDead) {
             setIsDead(true);
           } else if (newP.health > 0 && isDead) {
@@ -333,7 +293,7 @@ export default function App() {
 
     const loop = () => {
       // Update local player movement
-      if (playerId && players[playerId] && socketRef.current?.readyState === WebSocket.OPEN && !showShop && !isDead) {
+      if (playerId && players[playerId] && socketRef.current?.readyState === WebSocket.OPEN && !isDead) {
         const p = players[playerId];
         let dx = 0;
         let dy = 0;
@@ -424,15 +384,15 @@ export default function App() {
       }
 
       // Draw Grid
-      ctx.strokeStyle = "#111";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.03)";
       ctx.lineWidth = 1;
-      for (let x = 0; x < mapDim.w; x += 100) {
+      for (let x = 0; x < mapDim.w; x += 50) {
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, mapDim.h);
         ctx.stroke();
       }
-      for (let y = 0; y < mapDim.h; y += 100) {
+      for (let y = 0; y < mapDim.h; y += 50) {
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(mapDim.w, y);
@@ -442,61 +402,117 @@ export default function App() {
       // Draw Obstacles
       obstacles.forEach(obs => {
         if (obs.type === "wall") {
-          ctx.fillStyle = "#1a1a1a";
-          ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
-          ctx.strokeStyle = "#333";
-          ctx.lineWidth = 4;
-          ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+          // Shadow
+          ctx.fillStyle = "rgba(0,0,0,0.3)";
+          ctx.fillRect(obs.x + 8, obs.y + 8, obs.w, obs.h);
+
+          const gradient = ctx.createLinearGradient(obs.x, obs.y, obs.x + obs.w, obs.y + obs.h);
+          gradient.addColorStop(0, "#1a1a1a");
+          gradient.addColorStop(1, "#333");
           
-          // Texture
-          ctx.fillStyle = "#222";
-          for (let i = 10; i < obs.w; i += 40) {
-            for (let j = 10; j < obs.h; j += 40) {
-              ctx.fillRect(obs.x + i, obs.y + j, 20, 20);
-            }
-          }
-        } else {
-          ctx.fillStyle = "rgba(34, 197, 94, 0.3)";
+          ctx.fillStyle = gradient;
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = "rgba(0,0,0,0.5)";
           ctx.beginPath();
-          ctx.roundRect(obs.x, obs.y, obs.w, obs.h, 20);
+          ctx.roundRect(obs.x, obs.y, obs.w, obs.h, 8);
           ctx.fill();
-          ctx.strokeStyle = "rgba(34, 197, 94, 0.5)";
+          
+          ctx.strokeStyle = "rgba(255,255,255,0.1)";
+          ctx.lineWidth = 2;
           ctx.stroke();
+          
+          // Tech details
+          ctx.fillStyle = "rgba(255,255,255,0.05)";
+          ctx.fillRect(obs.x + 5, obs.y + 5, 2, 2);
+          ctx.fillRect(obs.x + obs.w - 7, obs.y + 5, 2, 2);
+          ctx.fillRect(obs.x + 5, obs.y + obs.h - 7, 2, 2);
+          ctx.fillRect(obs.x + obs.w - 7, obs.y + obs.h - 7, 2, 2);
+        } else {
+          // Bush
+          ctx.fillStyle = "rgba(34, 197, 94, 0.15)";
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = "rgba(34, 197, 94, 0.3)";
+          ctx.beginPath();
+          ctx.roundRect(obs.x, obs.y, obs.w, obs.h, 24);
+          ctx.fill();
+          
+          ctx.strokeStyle = "rgba(34, 197, 94, 0.3)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([10, 5]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Leaves
+          ctx.fillStyle = "rgba(34, 197, 94, 0.2)";
+          for (let i = 0; i < 5; i++) {
+            ctx.beginPath();
+            ctx.arc(obs.x + (i * 20) % obs.w, obs.y + (i * 15) % obs.h, 15, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
+        ctx.shadowBlur = 0;
       });
 
       // Draw Bullets
       bullets.forEach(b => {
-        ctx.fillStyle = b.isSuper ? "#f97316" : "#fff";
-        ctx.beginPath();
-        ctx.arc(b.x, b.y, b.isSuper ? 8 : 5, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.angle);
+        
+        const color = b.isSuper ? "#f97316" : "#fff";
+        ctx.shadowBlur = b.isSuper ? 20 : 10;
+        ctx.shadowColor = color;
+        
+        ctx.fillStyle = color;
         if (b.isSuper) {
-          ctx.shadowBlur = 20;
-          ctx.shadowColor = "#f97316";
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(-20, 10);
+          ctx.lineTo(-15, 0);
+          ctx.lineTo(-20, -10);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          ctx.fillRect(-10, -2, 12, 4);
         }
+        
+        ctx.restore();
       });
-      ctx.shadowBlur = 0;
 
       // Draw Ball
       if (ball) {
-        ctx.fillStyle = "#fff";
+        ctx.save();
+        ctx.translate(ball.x, ball.y);
+        
+        // Glow
+        const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 25);
+        glow.addColorStop(0, "rgba(255,255,255,0.2)");
+        glow.addColorStop(1, "transparent");
+        ctx.fillStyle = glow;
         ctx.beginPath();
-        ctx.arc(ball.x, ball.y, 15, 0, Math.PI * 2);
+        ctx.arc(0, 0, 25, 0, Math.PI * 2);
         ctx.fill();
+
+        ctx.fillStyle = "#fff";
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = "#fff";
+        ctx.beginPath();
+        ctx.arc(0, 0, 15, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Pattern
         ctx.strokeStyle = "#000";
         ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-15, 0);
+        ctx.lineTo(15, 0);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, -15);
+        ctx.lineTo(0, 15);
         ctx.stroke();
         
-        // Ball pattern
-        ctx.beginPath();
-        ctx.moveTo(ball.x - 15, ball.y);
-        ctx.lineTo(ball.x + 15, ball.y);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(ball.x, ball.y - 15);
-        ctx.lineTo(ball.x, ball.y + 15);
-        ctx.stroke();
+        ctx.restore();
       }
 
       // Draw Goals for Brawl Ball
@@ -532,63 +548,63 @@ export default function App() {
         ctx.translate(p.x, p.y);
         if (inBush) ctx.globalAlpha = 0.5;
         
-        // Health Bar
-        ctx.fillStyle = "rgba(0,0,0,0.5)";
-        ctx.fillRect(-25, -45, 50, 8);
-        ctx.fillStyle = p.health > (p.maxHealth * 0.3) ? (p.team === 1 ? "#3b82f6" : (p.team === 2 ? "#ef4444" : "#4ade80")) : "#f87171";
-        ctx.fillRect(-25, -45, (p.health / p.maxHealth) * 50, 8);
+        // Shadow
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.beginPath();
+        ctx.ellipse(0, 25, 20, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
 
-        // Name
-        ctx.fillStyle = isLocal ? "#f97316" : (p.team === 1 ? "#3b82f6" : (p.team === 2 ? "#ef4444" : "#fff"));
-        ctx.font = "bold 14px Inter";
-        ctx.textAlign = "center";
-        ctx.shadowBlur = 4;
-        ctx.shadowColor = "black";
-        ctx.fillText(p.name, 0, -55);
-        ctx.shadowBlur = 0;
-
-        // Tank Body
         ctx.rotate(p.angle);
+        
+        // Tank Body
+        const baseColor = p.color || "#3b82f6";
+        const bodyGradient = ctx.createLinearGradient(-20, -20, 20, 20);
+        bodyGradient.addColorStop(0, baseColor);
+        bodyGradient.addColorStop(1, "#000");
+        
+        ctx.fillStyle = bodyGradient;
+        ctx.beginPath();
+        ctx.roundRect(-22, -22, 44, 44, 8);
+        ctx.fill();
         
         // Treads
         ctx.fillStyle = "#111";
-        ctx.fillRect(-22, -22, 44, 10);
-        ctx.fillRect(-22, 12, 44, 10);
-
-        // Main Body
-        const skinData = SKINS[p.skin || "default"];
-        ctx.fillStyle = skinData.color;
-        ctx.beginPath();
-        ctx.roundRect(-18, -18, 36, 36, 8);
-        ctx.fill();
+        ctx.fillRect(-24, -22, 8, 44);
+        ctx.fillRect(16, -22, 8, 44);
         
-        // Pattern
-        if (skinData.pattern === "stripe") {
-          ctx.fillStyle = "rgba(0,0,0,0.2)";
-          ctx.fillRect(-18, -5, 36, 10);
-        } else if (skinData.pattern === "glow") {
-          ctx.strokeStyle = "rgba(255,255,255,0.4)";
-          ctx.lineWidth = 2;
-          ctx.strokeRect(-15, -15, 30, 30);
-        } else if (skinData.pattern === "shine") {
-          ctx.fillStyle = "rgba(255,255,255,0.3)";
-          ctx.fillRect(-10, -18, 5, 36);
-        }
-
         // Turret
-        ctx.fillStyle = skinData.color;
-        ctx.fillRect(0, -6, 28, 12);
-        ctx.strokeStyle = "rgba(0,0,0,0.3)";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(0, -6, 28, 12);
-        
-        // Hatch
-        ctx.fillStyle = "rgba(0,0,0,0.2)";
+        ctx.fillStyle = baseColor;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = baseColor;
         ctx.beginPath();
-        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.arc(0, 0, 14, 0, Math.PI * 2);
         ctx.fill();
-
+        
+        // Barrel
+        ctx.fillStyle = "#222";
+        ctx.fillRect(0, -6, 28, 12);
+        ctx.fillStyle = baseColor;
+        ctx.fillRect(24, -6, 6, 12);
+        
         ctx.restore();
+
+        // UI above player
+        const isTeammate = currentPlayer?.team && p.team === currentPlayer.team;
+        const healthColor = p.id === playerId ? "#22c55e" : (isTeammate ? "#3b82f6" : "#ef4444");
+
+        // Name
+        ctx.font = "bold 12px Inter";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#fff";
+        ctx.fillText(p.name, p.x, p.y - 45);
+
+        // Health Bar
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.roundRect(p.x - 20, p.y - 35, 40, 6, 3);
+        ctx.fill();
+        ctx.fillStyle = healthColor;
+        ctx.roundRect(p.x - 20, p.y - 35, (p.health / p.maxHealth) * 40, 6, 3);
+        ctx.fill();
       });
 
       ctx.restore();
@@ -598,10 +614,10 @@ export default function App() {
 
     loop();
     return () => cancelAnimationFrame(animationFrame);
-  }, [gameState, players, bullets, playerId, showShop, obstacles]);
+  }, [gameState, players, bullets, playerId, obstacles]);
 
   const handleShoot = () => {
-    if (gameState === "playing" && playerId && players[playerId] && socketRef.current?.readyState === WebSocket.OPEN && !showShop) {
+    if (gameState === "playing" && playerId && players[playerId] && socketRef.current?.readyState === WebSocket.OPEN) {
       playSound(400, "square", 0.05);
       
       const canvas = canvasRef.current;
@@ -626,7 +642,7 @@ export default function App() {
   };
 
   const handleSuper = () => {
-    if (playerId && players[playerId] && players[playerId].superCharge >= 100 && socketRef.current?.readyState === WebSocket.OPEN && !showShop) {
+    if (playerId && players[playerId] && players[playerId].superCharge >= 100 && socketRef.current?.readyState === WebSocket.OPEN) {
       playSound(600, "sawtooth", 0.4);
       shakeRef.current = 20;
       
@@ -648,47 +664,6 @@ export default function App() {
         angle,
         isSuper: true
       }));
-    }
-  };
-
-  const buyPack = () => {
-    if (money >= 1000) {
-      const newMoney = money - 1000;
-      setMoney(newMoney);
-      const skinKeys = Object.keys(SKINS).filter(k => !unlockedSkins.includes(k));
-      if (skinKeys.length > 0) {
-        const newSkin = skinKeys[Math.floor(Math.random() * skinKeys.length)];
-        const newSkins = [...unlockedSkins, newSkin];
-        setUnlockedSkins(newSkins);
-        saveProgress({ money: newMoney, unlockedSkins: newSkins });
-        setKillNotify(`UNLOCKED: ${SKINS[newSkin].name}!`);
-        setTimeout(() => setKillNotify(null), 3000);
-      } else {
-        saveProgress({ money: newMoney });
-        setKillNotify("ALL SKINS UNLOCKED!");
-        setTimeout(() => setKillNotify(null), 2000);
-      }
-    }
-  };
-
-  const selectSkin = (skin: string) => {
-    setCurrentSkin(skin);
-    saveProgress({ currentSkin: skin });
-  };
-
-  const buySkin = (id: string) => {
-    if (unlockedSkins.includes(id)) {
-      selectSkin(id);
-      return;
-    }
-    if (money >= SKINS[id].price) {
-      const newMoney = money - SKINS[id].price;
-      const newSkins = [...unlockedSkins, id];
-      setMoney(newMoney);
-      setUnlockedSkins(newSkins);
-      selectSkin(id);
-      saveProgress({ money: newMoney, unlockedSkins: newSkins, currentSkin: id });
-      playSound(880, "sine", 0.1);
     }
   };
 
@@ -744,250 +719,338 @@ export default function App() {
     socketRef.current?.close();
   };
 
-  const sendFriendRequest = async (targetUid: string) => {
-    if (!user || targetUid === user.uid) return;
-    try {
-      const targetDoc = await getDoc(doc(db, "users", targetUid));
-      if (targetDoc.exists()) {
-        const targetData = targetDoc.data();
-        const currentRequests = targetData.friendRequests || [];
-        if (!currentRequests.includes(user.uid)) {
-          await updateDoc(doc(db, "users", targetUid), {
-            friendRequests: [...currentRequests, user.uid]
-          });
-          setKillNotify("FRIEND REQUEST SENT!");
-          setTimeout(() => setKillNotify(null), 2000);
-        }
-      }
-    } catch (e) {
-      console.error("Error sending friend request:", e);
-    }
-  };
-
-  const acceptFriendRequest = async (requestUid: string) => {
-    if (!user) return;
-    try {
-      const newRequests = friendRequests.filter(id => id !== requestUid);
-      const newFriends = [...friends, requestUid];
-      
-      // Update my profile
-      await updateDoc(doc(db, "users", user.uid), {
-        friendRequests: newRequests,
-        friends: newFriends
-      });
-      setFriendRequests(newRequests);
-      setFriends(newFriends);
-
-      // Update their profile
-      const otherDoc = await getDoc(doc(db, "users", requestUid));
-      if (otherDoc.exists()) {
-        const otherFriends = otherDoc.data().friends || [];
-        await updateDoc(doc(db, "users", requestUid), {
-          friends: [...otherFriends, user.uid]
-        });
-      }
-      
-      setKillNotify("FRIEND ADDED!");
-      setTimeout(() => setKillNotify(null), 2000);
-    } catch (e) {
-      console.error("Error accepting friend request:", e);
-    }
-  };
-
   const currentPlayer = playerId ? players[playerId] : null;
   const leaderboard = (Object.values(players) as Player[])
-    .sort((a, b) => b.kills - a.kills)
+    .sort((a, b) => b.health - a.health)
     .slice(0, 5);
-
-  const kdRatio = currentPlayer ? (currentPlayer.kills / (currentPlayer.deaths || 1)).toFixed(2) : "0.00";
-
-  if (loading) return (
-    <div className="min-h-screen bg-[#050505] flex items-center justify-center">
-      <motion.div 
-        animate={{ rotate: 360 }}
-        transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-        className="w-12 h-12 border-4 border-orange-500 border-t-transparent rounded-full"
-      />
-    </div>
-  );
 
   return (
     <div 
-      className="min-h-screen bg-[#050505] text-white font-sans overflow-hidden flex flex-col items-center justify-center touch-none select-none"
+      className="min-h-screen bg-[#050505] text-white font-sans overflow-hidden flex flex-col items-center justify-center touch-none select-none relative"
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
+      {/* Background Decoration */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-orange-500/10 blur-[160px] rounded-full animate-pulse" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-blue-500/10 blur-[160px] rounded-full animate-pulse" style={{ animationDelay: '2s' }} />
+        <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-5" />
+        
+        {/* Particle System */}
+        <div className="absolute inset-0">
+          {[...Array(20)].map((_, i) => (
+            <motion.div
+              key={i}
+              className="absolute w-1 h-1 bg-white/10 rounded-full"
+              initial={{ 
+                x: Math.random() * window.innerWidth, 
+                y: Math.random() * window.innerHeight,
+                opacity: Math.random() * 0.5
+              }}
+              animate={{ 
+                y: [null, Math.random() * -100],
+                opacity: [0, 0.5, 0]
+              }}
+              transition={{ 
+                duration: 5 + Math.random() * 10, 
+                repeat: Infinity, 
+                ease: "linear" 
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
       <AnimatePresence mode="wait">
         {gameState === "lobby" ? (
           <motion.div
             key="lobby"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.1 }}
-            className="w-full max-w-4xl p-10 flex flex-col md:flex-row gap-10"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 1.05 }}
+            className="w-full max-w-6xl p-6 flex flex-col gap-8 z-10"
           >
-            {/* Left Side: Profile & Stats */}
-            <div className="flex-1 space-y-6">
-              <div className="bg-[#0f0f0f] border border-[#222] p-8 rounded-[2.5rem] shadow-2xl">
-                <div className="flex items-center gap-6 mb-8">
-                  <div className="w-20 h-20 rounded-2xl shadow-xl flex items-center justify-center" style={{ backgroundColor: SKINS[currentSkin].color }}>
-                    <Users className="w-10 h-10 text-white/50" />
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <input
-                        type="text"
-                        value={playerName}
-                        onChange={(e) => {
-                          setPlayerName(e.target.value);
-                          saveProgress({ name: e.target.value });
-                        }}
-                        placeholder="Brawler Name"
-                        className="bg-transparent text-3xl font-black uppercase italic tracking-tighter focus:outline-none border-b-2 border-white/5 focus:border-orange-500 transition-all w-full"
-                      />
-                      {user && (
-                        <button onClick={handleLogout} className="p-2 hover:bg-white/5 rounded-lg transition-colors text-gray-500 hover:text-red-500">
-                          <LogOut className="w-5 h-5" />
-                        </button>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mt-1">Player Profile</p>
+            {/* Header Section */}
+            <div className="flex flex-col md:flex-row items-center justify-between gap-8">
+              <div className="flex items-center gap-6">
+                <div className="relative group">
+                  <motion.div 
+                    className="w-24 h-24 bg-gradient-to-br from-orange-500 to-red-600 rounded-3xl shadow-2xl flex items-center justify-center transform -rotate-6 group-hover:rotate-0 transition-transform duration-500"
+                    whileHover={{ scale: 1.1 }}
+                  >
+                    <Sword className="w-12 h-12 text-white" />
+                  </motion.div>
+                  <div className="absolute -bottom-2 -right-2 bg-white text-black p-2 rounded-xl shadow-lg transform rotate-12 group-hover:rotate-0 transition-transform duration-500">
+                    <Crown className="w-4 h-4" />
                   </div>
                 </div>
-
-                {!user ? (
-                  <div className="bg-orange-500/10 border border-orange-500/20 p-6 rounded-3xl text-center">
-                    <p className="text-sm font-bold text-orange-200 mb-4">Sign in to save your progress!</p>
-                    <button 
-                      onClick={handleLogin}
-                      className="w-full bg-white text-black font-black py-4 rounded-2xl flex items-center justify-center gap-3 hover:bg-gray-100 transition-all"
-                    >
-                      <LogIn className="w-5 h-5" />
-                      Login with Google
-                    </button>
+                <div>
+                  <h1 className="text-7xl font-black tracking-tighter uppercase italic leading-none font-display bg-gradient-to-r from-white via-white to-orange-500 bg-clip-text text-transparent">
+                    LIAM<span className="text-orange-500">STARS</span>
+                  </h1>
+                  <div className="flex items-center gap-2 mt-3">
+                    <span className="px-3 py-1 bg-orange-500/10 text-orange-500 text-[10px] font-black uppercase tracking-widest rounded-full border border-orange-500/20 backdrop-blur-md">Alpha 4.0</span>
+                    <span className="text-[10px] text-white/40 font-bold uppercase tracking-widest">Next-Gen Multiplayer Arena</span>
                   </div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Total Kills</p>
-                      <p className="text-2xl font-black">{kills}</p>
-                    </div>
-                    <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Total Deaths</p>
-                      <p className="text-2xl font-black">{deaths}</p>
-                    </div>
-                    <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Trophies</p>
-                      <p className="text-2xl font-black text-orange-500 flex items-center gap-2">
-                        <Trophy className="w-5 h-5" />
-                        {trophies}
-                      </p>
-                    </div>
-                    <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Balance</p>
-                      <p className="text-2xl font-black text-yellow-400">${money}</p>
-                    </div>
-                  </div>
-                )}
+                </div>
               </div>
 
-              <div className="bg-[#0f0f0f] border border-[#222] p-8 rounded-[2.5rem] shadow-2xl">
-                <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-6">Friends</h3>
-                <div className="space-y-4">
-                  <button 
-                    onClick={() => setShowFriends(true)}
-                    className="w-full bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all"
-                  >
-                    <Users className="w-5 h-5" />
-                    Manage Friends ({friends.length})
-                  </button>
-                  {friendRequests.length > 0 && (
-                    <div className="bg-orange-500/10 border border-orange-500/20 p-4 rounded-2xl text-center">
-                      <p className="text-xs font-bold text-orange-200">{friendRequests.length} New Friend Requests!</p>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-4 bg-white/5 p-2 rounded-full border border-white/10 backdrop-blur-xl">
+                  <div className="flex items-center gap-3 px-6 py-3 bg-black/40 rounded-full border border-white/5">
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                    <div>
+                      <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Network</p>
+                      <p className="text-sm font-black leading-none">STABLE</p>
                     </div>
+                  </div>
+                </div>
+                
+                <div className="relative">
+                  <button className="p-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full transition-all">
+                    <Bell className="w-6 h-6 text-white/60" />
+                  </button>
+                  {invites.length > 0 && (
+                    <span className="absolute top-0 right-0 w-5 h-5 bg-orange-500 rounded-full flex items-center justify-center text-[10px] font-black border-2 border-[#050505]">
+                      {invites.length}
+                    </span>
                   )}
                 </div>
               </div>
             </div>
 
-            {/* Right Side: Play & Shop */}
-            <div className="flex-1 flex flex-col gap-6">
-              <div className="bg-[#0f0f0f] border border-[#222] p-8 rounded-[2.5rem] shadow-2xl flex-1 flex flex-col justify-center">
-                <div className="flex items-center gap-4 mb-12">
-                  <div className="p-4 bg-orange-500 rounded-2xl shadow-lg shadow-orange-500/20">
-                    <Sword className="w-10 h-10 text-white" />
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+              {/* Left Column: Profile & Search */}
+              <div className="lg:col-span-4 space-y-6">
+                <div className="bg-white/5 border border-white/10 p-8 rounded-[3rem] backdrop-blur-2xl shadow-2xl relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 p-6 opacity-5 group-hover:opacity-10 transition-opacity">
+                    <Settings className="w-32 h-32" />
                   </div>
-                  <div>
-                    <h1 className="text-4xl font-black tracking-tighter uppercase italic leading-none">Liam Stars</h1>
-                    <p className="text-[10px] text-orange-500 font-mono uppercase tracking-[0.3em] mt-1">Arena Combat v3.1</p>
+                  
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 mb-8 flex items-center gap-2">
+                    <User className="w-4 h-4" />
+                    Brawler Profile
+                  </h3>
+
+                  <div className="space-y-8 relative z-10">
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Identity</label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={playerName}
+                          onChange={(e) => setPlayerName(e.target.value)}
+                          placeholder="Enter Name"
+                          className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-5 focus:outline-none focus:border-orange-500 transition-all font-black uppercase italic text-2xl tracking-tight placeholder:text-white/10"
+                        />
+                        <div className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 bg-orange-500/20 rounded-lg flex items-center justify-center">
+                          <Plus className="w-4 h-4 text-orange-500" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Global Search</label>
+                      <div className="relative">
+                        <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-white/20" />
+                        <input
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => searchPlayers(e.target.value)}
+                          placeholder="Search Players..."
+                          className="w-full bg-white/5 border border-white/10 rounded-2xl pl-14 pr-6 py-4 focus:outline-none focus:border-blue-500 transition-all font-bold text-sm tracking-tight placeholder:text-white/10"
+                        />
+                      </div>
+                      
+                      <AnimatePresence>
+                        {searchQuery && (
+                          <motion.div 
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -10 }}
+                            className="bg-black/60 border border-white/10 rounded-2xl overflow-hidden divide-y divide-white/5"
+                          >
+                            {searchResults.length > 0 ? searchResults.map(p => (
+                              <div key={p.id} className="flex items-center justify-between p-4 hover:bg-white/5 transition-colors">
+                                <span className="font-bold text-sm">{p.name}</span>
+                                <button 
+                                  onClick={() => invitePlayer(p.id)}
+                                  className="p-2 bg-blue-500/20 hover:bg-blue-500 text-blue-500 hover:text-white rounded-xl transition-all"
+                                >
+                                  <UserPlus className="w-4 h-4" />
+                                </button>
+                              </div>
+                            )) : (
+                              <div className="p-4 text-center text-white/20 text-xs font-bold uppercase tracking-widest">No Players Found</div>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   </div>
                 </div>
 
-                <div className="space-y-4">
-                  <input
-                    type="text"
-                    value={roomId}
-                    onChange={(e) => setRoomId(e.target.value)}
-                    placeholder="Join Room ID (Optional)"
-                    className="w-full bg-[#050505] border border-[#222] rounded-2xl px-6 py-4 focus:outline-none focus:border-orange-500 transition-all placeholder:text-gray-700 text-sm font-bold"
-                  />
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={() => connect("practice")}
-                    className="bg-white text-black font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] uppercase italic tracking-tight text-xl"
-                  >
-                    Practice
-                  </button>
-                  <button
-                    onClick={() => connect("showdown")}
-                    className="bg-orange-500 hover:bg-orange-600 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-orange-500/20 uppercase italic tracking-tight text-xl"
-                  >
-                    Showdown
-                  </button>
-                  <button
-                    onClick={() => connect("duel")}
-                    className="bg-purple-600 hover:bg-purple-700 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-purple-500/20 uppercase italic tracking-tight text-xl"
-                  >
-                    1v1 Duel
-                  </button>
-                  <button
-                    onClick={() => connect("brawlball")}
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-blue-500/20 uppercase italic tracking-tight text-xl"
-                  >
-                    Brawl Ball
-                  </button>
-                  <button
-                    onClick={() => connect("knockout")}
-                    className="bg-red-600 hover:bg-red-700 text-white font-black py-4 rounded-2xl transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-red-500/20 uppercase italic tracking-tight text-xl col-span-2"
-                  >
-                    Knockout
-                  </button>
-                </div>
-                <button
-                  onClick={() => { setShopTab("skins"); setShowShop(true); }}
-                  className="w-full bg-white/5 hover:bg-white/10 text-white font-black py-4 rounded-2xl transition-all uppercase italic tracking-tight text-sm border border-white/5"
-                >
-                  Open Shop
-                </button>
+                {/* Party Section */}
+                <div className="bg-white/5 border border-white/10 p-8 rounded-[3rem] backdrop-blur-2xl shadow-2xl">
+                  <div className="flex items-center justify-between mb-8">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-blue-400 flex items-center gap-2">
+                      <Users className="w-4 h-4" />
+                      Your Party
+                    </h3>
+                    {party && (
+                      <button onClick={leaveParty} className="p-2 hover:bg-red-500/20 text-red-500 rounded-lg transition-all">
+                        <LogOut className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-3">
+                    {party ? party.members.map(m => (
+                      <div key={m.id} className="flex items-center gap-4 p-4 bg-white/5 rounded-2xl border border-white/5">
+                        <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center font-black text-sm">
+                          {m.name[0].toUpperCase()}
+                        </div>
+                        <div className="flex-1">
+                          <p className="font-bold text-sm">{m.name}</p>
+                          <p className="text-[8px] font-black text-white/20 uppercase tracking-widest">
+                            {m.id === party.leaderId ? "Party Leader" : "Member"}
+                          </p>
+                        </div>
+                        {m.id === party.leaderId && <Crown className="w-4 h-4 text-yellow-500" />}
+                      </div>
+                    )) : (
+                      <div className="text-center py-8 space-y-4">
+                        <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto">
+                          <Users className="w-8 h-8 text-white/10" />
+                        </div>
+                        <p className="text-white/20 text-[10px] font-black uppercase tracking-widest">Solo Queue Active</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-[#0f0f0f] border border-[#222] p-6 rounded-[2.5rem] shadow-2xl flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl" style={{ backgroundColor: SKINS[currentSkin].color }} />
-                  <div>
-                    <p className="text-[10px] font-bold text-gray-500 uppercase">Current Skin</p>
-                    <p className="font-black uppercase italic">{SKINS[currentSkin].name}</p>
+              {/* Middle Column: Game Modes */}
+              <div className="lg:col-span-8 flex flex-col gap-6">
+                <div className="bg-white/5 border border-white/10 p-10 rounded-[3.5rem] backdrop-blur-2xl shadow-2xl flex-1 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-96 h-96 bg-orange-500/5 blur-[100px] rounded-full -mr-48 -mt-48" />
+                  
+                  <div className="flex items-center justify-between mb-12 relative z-10">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 flex items-center gap-3">
+                      <Target className="w-4 h-4" />
+                      Select Battle Arena
+                    </h3>
+                    <div className="flex items-center gap-3 px-4 py-2 bg-white/5 rounded-full border border-white/5">
+                      <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                      <span className="text-[10px] font-black text-white/40 uppercase tracking-widest">Servers Operational</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 relative z-10">
+                    <motion.button
+                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => connect("practice")}
+                      className="group relative bg-white/5 hover:bg-white/10 border border-white/10 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden"
+                    >
+                      <div className="absolute top-0 right-0 p-6 opacity-5 group-hover:opacity-10 transition-opacity">
+                        <Target className="w-32 h-32" />
+                      </div>
+                      <div className="w-12 h-12 bg-white/5 rounded-2xl flex items-center justify-center mb-4 group-hover:bg-white/10 transition-colors">
+                        <Play className="w-6 h-6 text-white/40" />
+                      </div>
+                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">Practice</h4>
+                      <p className="text-white/40 text-sm font-medium">Refine your skills against advanced AI bots in a safe environment.</p>
+                    </motion.button>
+
+                    <motion.button
+                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => connect("showdown")}
+                      className="group relative bg-gradient-to-br from-orange-500 to-red-600 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-orange-500/20"
+                    >
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <Flame className="w-32 h-32" />
+                      </div>
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <Zap className="w-6 h-6 text-white" />
+                      </div>
+                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">Showdown</h4>
+                      <p className="text-white/70 text-sm font-medium">The ultimate test. 10 players, one winner. Survival of the fittest.</p>
+                    </motion.button>
+
+                    <motion.button
+                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => connect("duel")}
+                      className="group relative bg-gradient-to-br from-purple-600 to-indigo-800 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-purple-500/20"
+                    >
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <Sword className="w-32 h-32" />
+                      </div>
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <Shield className="w-6 h-6 text-white" />
+                      </div>
+                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">1v1 Duel</h4>
+                      <p className="text-white/70 text-sm font-medium">Pure mechanical skill. Face off against a single opponent.</p>
+                    </motion.button>
+
+                    <motion.button
+                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => connect("brawlball")}
+                      className="group relative bg-gradient-to-br from-blue-600 to-cyan-700 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-blue-500/20"
+                    >
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <Gamepad2 className="w-32 h-32" />
+                      </div>
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <Trophy className="w-6 h-6 text-white" />
+                      </div>
+                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">Brawl Ball</h4>
+                      <p className="text-white/70 text-sm font-medium">Teamwork makes the dream work. Score goals to dominate.</p>
+                    </motion.button>
                   </div>
                 </div>
-                <button 
-                  onClick={() => { setShopTab("skins"); setShowShop(true); }}
-                  className="px-6 py-3 bg-white text-black font-black rounded-xl text-[10px] uppercase tracking-widest hover:bg-gray-200 transition-colors"
-                >
-                  Change
-                </button>
               </div>
+            </div>
+
+            {/* Invite Notifications */}
+            <div className="fixed bottom-8 right-8 space-y-4 z-[100]">
+              <AnimatePresence>
+                {invites.map(invite => (
+                  <motion.div
+                    key={invite.fromId}
+                    initial={{ opacity: 0, x: 50, scale: 0.9 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    className="bg-white text-black p-6 rounded-3xl shadow-2xl flex items-center gap-6 border-4 border-orange-500"
+                  >
+                    <div className="w-12 h-12 bg-orange-500 rounded-2xl flex items-center justify-center">
+                      <Users className="w-6 h-6 text-white" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">Party Invite</p>
+                      <p className="font-black text-lg uppercase italic">{invite.fromName}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => acceptInvite(invite.fromId)}
+                        className="px-6 py-3 bg-black text-white font-black rounded-xl uppercase italic text-xs hover:bg-orange-500 transition-all"
+                      >
+                        Accept
+                      </button>
+                      <button 
+                        onClick={() => setInvites(prev => prev.filter(i => i.fromId !== invite.fromId))}
+                        className="p-3 bg-gray-100 hover:bg-red-500 hover:text-white rounded-xl transition-all"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             </div>
           </motion.div>
         ) : (
@@ -1031,11 +1094,7 @@ export default function App() {
                   </button>
                   <div className="w-10 h-10 rounded-xl" style={{ backgroundColor: currentPlayer?.color }} />
                   <div>
-                    <h3 className="font-black uppercase italic tracking-tight leading-none">{currentPlayer?.name}</h3>
-                    <div className="flex gap-3 mt-1">
-                      <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest">K: {currentPlayer?.kills}</span>
-                      <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest">D: {currentPlayer?.deaths}</span>
-                    </div>
+                    <h3 className="font-black uppercase italic tracking-tight leading-none font-display">{currentPlayer?.name}</h3>
                   </div>
                 </div>
 
@@ -1066,7 +1125,6 @@ export default function App() {
                   {leaderboard.map((p, i) => (
                     <div key={p.id} className="flex items-center justify-between gap-8">
                       <span className={`text-[10px] font-bold ${p.id === playerId ? 'text-orange-500' : 'text-gray-400'}`}>{p.name}</span>
-                      <span className="text-[10px] font-black">{p.kills}</span>
                     </div>
                   ))}
                 </div>
@@ -1170,12 +1228,6 @@ export default function App() {
                     <p className="text-orange-500 font-bold uppercase tracking-[0.3em] mb-4">
                       {winnerId.startsWith("team") ? (winnerId === "team1" ? "Blue Team Wins!" : "Red Team Wins!") : `${players[winnerId]?.name} is the winner!`}
                     </p>
-                    {(winnerId === playerId || (currentPlayer && ((winnerId === "team1" && currentPlayer.team === 1) || (winnerId === "team2" && currentPlayer.team === 2)))) && (
-                      <div className="bg-orange-500/20 border border-orange-500/30 p-4 rounded-2xl inline-flex items-center gap-3">
-                        <Trophy className="w-6 h-6 text-yellow-400" />
-                        <span className="text-2xl font-black text-white">+10 Trophies</span>
-                      </div>
-                    )}
                     <div className="pt-8">
                       <button
                         onClick={handleBackToMenu}
@@ -1229,204 +1281,6 @@ export default function App() {
                 </motion.div>
               )}
             </AnimatePresence>
-
-            {/* Kill Notification */}
-            <AnimatePresence>
-              {killNotify && (
-                <motion.div
-                  initial={{ y: -100, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  exit={{ y: -100, opacity: 0 }}
-                  className="absolute top-32 left-1/2 -translate-x-1/2 bg-orange-500 px-8 py-4 rounded-2xl shadow-2xl z-50 border-2 border-orange-400"
-                >
-                  <p className="font-black uppercase italic tracking-widest text-white text-2xl">{killNotify}</p>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Shop Overlay (Shared) */}
-      <AnimatePresence>
-        {showShop && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="absolute inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-          >
-            <motion.div
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
-              className="bg-[#0f0f0f] border border-[#222] p-8 md:p-10 rounded-[3rem] shadow-3xl w-full max-w-2xl overflow-hidden flex flex-col"
-            >
-              <div className="flex justify-between items-center mb-8">
-                <div>
-                  <h2 className="text-3xl font-black uppercase italic tracking-tighter">Brawler Shop</h2>
-                  <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Balance: <span className="text-yellow-400">${money}</span></p>
-                </div>
-                <button onClick={() => setShowShop(false)} className="p-4 bg-white/5 hover:bg-white/10 rounded-2xl transition-colors">
-                  <kbd className="text-xs font-bold">ESC</kbd>
-                </button>
-              </div>
-
-              <div className="flex gap-2 mb-8 bg-black/40 p-1.5 rounded-2xl border border-white/5">
-                {(["skins", "packs"] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setShopTab(tab)}
-                    className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
-                      shopTab === tab ? "bg-orange-500 text-white shadow-lg" : "text-gray-500 hover:text-gray-300"
-                    }`}
-                  >
-                    {tab}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar min-h-[300px]">
-                {shopTab === "skins" && (
-                  <div className="grid grid-cols-2 gap-4">
-                    {Object.entries(SKINS).map(([id, skin]) => (
-                      <button
-                        key={id}
-                        onClick={() => buySkin(id)}
-                        className={`p-6 rounded-2xl border transition-all text-left flex flex-col items-center gap-4 ${
-                          currentSkin === id 
-                          ? "border-orange-500 bg-orange-500/10" 
-                          : "border-[#222] bg-[#151515] hover:border-white/20"
-                        } ${!unlockedSkins.includes(id) && money < skin.price ? "opacity-50 grayscale" : ""}`}
-                      >
-                        <div className="w-16 h-16 rounded-2xl shadow-2xl" style={{ backgroundColor: skin.color }} />
-                        <div className="text-center">
-                          <h4 className="font-black uppercase italic tracking-tight">{skin.name}</h4>
-                          {!unlockedSkins.includes(id) ? (
-                            <div className="flex items-center justify-center gap-1 mt-1">
-                              <Coins className="w-3 h-3 text-yellow-400" />
-                              <span className="text-xs font-black text-yellow-400">{skin.price}</span>
-                            </div>
-                          ) : (
-                            <span className={`text-[8px] font-black uppercase tracking-widest ${currentSkin === id ? 'text-orange-500' : 'text-green-500'}`}>
-                              {currentSkin === id ? "Equipped" : "Unlocked"}
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {shopTab === "packs" && (
-                  <div className="flex flex-col items-center justify-center p-10 text-center">
-                    <div className="w-32 h-32 bg-gradient-to-br from-orange-500 to-yellow-500 rounded-[2rem] flex items-center justify-center mb-6 shadow-2xl shadow-orange-500/20 animate-bounce">
-                      <Target className="w-16 h-16 text-white" />
-                    </div>
-                    <h3 className="text-2xl font-black uppercase italic tracking-tighter mb-2">Mystery Skin Pack</h3>
-                    <p className="text-gray-500 text-sm mb-8 max-w-xs">Unlock a random premium skin for your tank!</p>
-                    <button
-                      onClick={buyPack}
-                      disabled={money < 1000}
-                      className="w-full py-5 bg-orange-500 hover:bg-orange-600 disabled:opacity-50 text-white font-black rounded-2xl uppercase italic tracking-tight text-xl shadow-xl shadow-orange-500/20 transition-all transform active:scale-95"
-                    >
-                      Buy Pack - $1000
-                    </button>
-                  </div>
-                )}
-              </div>
-              
-              <button 
-                onClick={() => setShowShop(false)}
-                className="w-full mt-8 py-4 bg-white text-black font-black rounded-2xl uppercase italic tracking-tight hover:bg-gray-200 transition-colors"
-              >
-                Close Shop
-              </button>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-      {/* Friends Overlay */}
-      <AnimatePresence>
-        {showFriends && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="absolute inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-          >
-            <motion.div
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
-              className="bg-[#0f0f0f] border border-[#222] p-8 md:p-10 rounded-[3rem] shadow-3xl w-full max-w-md overflow-hidden flex flex-col"
-            >
-              <div className="flex justify-between items-center mb-8">
-                <div>
-                  <h2 className="text-3xl font-black uppercase italic tracking-tighter">Friends</h2>
-                  <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">{friends.length} Friends</p>
-                </div>
-                <button onClick={() => setShowFriends(false)} className="p-4 bg-white/5 hover:bg-white/10 rounded-2xl transition-colors">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
-                <div>
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">Add Friend</h3>
-                  <div className="flex gap-2">
-                    <input 
-                      type="text"
-                      value={friendSearch}
-                      onChange={(e) => setFriendSearch(e.target.value)}
-                      placeholder="Enter User ID"
-                      className="flex-1 bg-black/40 border border-white/5 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500 transition-all text-sm"
-                    />
-                    <button 
-                      onClick={() => { sendFriendRequest(friendSearch); setFriendSearch(""); }}
-                      className="p-3 bg-orange-500 rounded-xl hover:bg-orange-600 transition-all"
-                    >
-                      <Plus className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-
-                {friendRequests.length > 0 && (
-                  <div>
-                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 mb-4">Pending Requests</h3>
-                    <div className="space-y-2">
-                      {friendRequests.map(reqId => (
-                        <div key={reqId} className="bg-white/5 p-4 rounded-2xl flex items-center justify-between border border-white/5">
-                          <span className="text-xs font-bold text-gray-400 truncate max-w-[150px]">{reqId}</span>
-                          <button 
-                            onClick={() => acceptFriendRequest(reqId)}
-                            className="bg-orange-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase italic tracking-tight hover:bg-orange-600 transition-all"
-                          >
-                            Accept
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div>
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">Your Friends</h3>
-                  {friends.length === 0 ? (
-                    <p className="text-center text-gray-600 text-xs py-8">No friends yet. Add some!</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {friends.map(fId => (
-                        <div key={fId} className="bg-white/5 p-4 rounded-2xl flex items-center gap-4 border border-white/5">
-                          <div className="w-10 h-10 bg-gray-800 rounded-lg flex items-center justify-center">
-                            <User className="w-5 h-5 text-gray-600" />
-                          </div>
-                          <span className="text-sm font-bold truncate">{fId}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

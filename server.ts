@@ -16,6 +16,10 @@ async function startServer() {
 
   // Game State
   const rooms: Record<string, any> = {};
+  const allPlayers: Record<string, { id: string, name: string, partyId: string | null }> = {};
+  const lobbySockets: Record<string, WebSocket> = {};
+  const parties: Record<string, { id: string, leaderId: string, members: string[] }> = {};
+
   const MODE_CONFIGS: Record<string, { players: number, teams: boolean, hasBall?: boolean }> = {
     practice: { players: 100, teams: false },
     showdown: { players: 10, teams: false },
@@ -42,25 +46,126 @@ async function startServer() {
     return obstacles;
   };
 
+  const broadcastPartyUpdate = (partyId: string) => {
+    const party = parties[partyId];
+    if (!party) return;
+
+    const partyUpdate = JSON.stringify({ 
+      type: "PARTY_UPDATE", 
+      party: {
+        id: partyId,
+        leaderId: party.leaderId,
+        members: party.members.map(mId => ({ 
+          id: mId, 
+          name: allPlayers[mId]?.name || "Unknown" 
+        }))
+      }
+    });
+
+    party.members.forEach(mId => {
+      const ws = lobbySockets[mId];
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(partyUpdate);
+      }
+    });
+  };
+
   wss.on("connection", (ws: WebSocket) => {
     let currentRoomId: string | null = null;
     let playerId: string = nanoid();
 
     ws.on("message", (data: string) => {
       const message = JSON.parse(data.toString());
+      if (message.playerId) playerId = message.playerId;
 
       switch (message.type) {
+        case "LOBBY_JOIN":
+          if (!allPlayers[playerId]) {
+            allPlayers[playerId] = { id: playerId, name: message.name, partyId: null };
+          } else {
+            allPlayers[playerId].name = message.name;
+          }
+          lobbySockets[playerId] = ws;
+          ws.send(JSON.stringify({ type: "LOBBY_INIT", playerId }));
+          
+          // If already in a party, send update
+          if (allPlayers[playerId].partyId) {
+            broadcastPartyUpdate(allPlayers[playerId].partyId!);
+          }
+          break;
+
+        case "SEARCH_PLAYERS":
+          const query = message.query.toLowerCase();
+          const results = Object.values(allPlayers)
+            .filter(p => p.name.toLowerCase().includes(query) && p.id !== playerId && lobbySockets[p.id])
+            .map(p => ({ id: p.id, name: p.name }));
+          ws.send(JSON.stringify({ type: "SEARCH_RESULTS", results }));
+          break;
+
+        case "PARTY_INVITE":
+          const targetWs = lobbySockets[message.targetId];
+          if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(JSON.stringify({ 
+              type: "PARTY_INVITE_RECEIVED", 
+              fromId: playerId, 
+              fromName: allPlayers[playerId]?.name 
+            }));
+          }
+          break;
+
+        case "PARTY_ACCEPT":
+          const inviter = allPlayers[message.fromId];
+          if (inviter) {
+            let partyId = inviter.partyId;
+            if (!partyId) {
+              partyId = nanoid();
+              parties[partyId] = { id: partyId, leaderId: inviter.id, members: [inviter.id] };
+              inviter.partyId = partyId;
+            }
+            
+            if (parties[partyId] && !parties[partyId].members.includes(playerId)) {
+              parties[partyId].members.push(playerId);
+              allPlayers[playerId].partyId = partyId;
+            }
+
+            broadcastPartyUpdate(partyId);
+          }
+          break;
+
+        case "PARTY_LEAVE":
+          const pId = allPlayers[playerId]?.partyId;
+          if (pId && parties[pId]) {
+            const party = parties[pId];
+            party.members = party.members.filter(m => m !== playerId);
+            allPlayers[playerId].partyId = null;
+            
+            if (party.members.length === 0) {
+              delete parties[pId];
+            } else {
+              if (party.leaderId === playerId) {
+                party.leaderId = party.members[0];
+              }
+              broadcastPartyUpdate(pId);
+            }
+            ws.send(JSON.stringify({ type: "PARTY_UPDATE", party: null }));
+          }
+          break;
+
         case "JOIN_ROOM":
         case "JOIN_QUEUE":
           const mode = message.mode || "practice";
           const config = MODE_CONFIGS[mode] || MODE_CONFIGS.practice;
+          const partyIdJoin = allPlayers[playerId]?.partyId;
+          const isLeader = partyIdJoin && parties[partyIdJoin]?.leaderId === playerId;
+          const partyMembers = isLeader ? parties[partyIdJoin].members : [playerId];
+          const partySize = partyMembers.length;
           
           if (mode !== "practice") {
-            // Find a room for this mode that hasn't started and isn't full
+            // Find a room for this mode that hasn't started and has enough space for the whole party
             currentRoomId = Object.keys(rooms).find(id => 
               rooms[id].mode === mode && 
               !rooms[id].started && 
-              Object.keys(rooms[id].players).length < config.players
+              (Object.keys(rooms[id].players).length + partySize) <= config.players
             ) || `${mode}_${nanoid(5)}`;
           } else {
             currentRoomId = message.roomId || "default";
@@ -81,6 +186,23 @@ async function startServer() {
           }
           
           const room = rooms[currentRoomId];
+
+          // If leader, tell all other party members to join this specific room
+          if (isLeader) {
+            partyMembers.forEach(mId => {
+              if (mId !== playerId) {
+                const mWs = lobbySockets[mId];
+                if (mWs && mWs.readyState === WebSocket.OPEN) {
+                  mWs.send(JSON.stringify({
+                    type: "GAME_START_REQUEST",
+                    mode,
+                    roomId: currentRoomId
+                  }));
+                }
+              }
+            });
+          }
+          
           const stats = message.stats || {};
           
           // Assign team if needed
@@ -97,10 +219,6 @@ async function startServer() {
             y: Math.random() * MAP_HEIGHT,
             health: stats.maxHealth || 100,
             maxHealth: stats.maxHealth || 100,
-            money: stats.money || 0,
-            trophies: stats.trophies || 0,
-            kills: stats.kills || 0,
-            deaths: stats.deaths || 0,
             damage: stats.damage || 10,
             speed: stats.speed || 3.5,
             superCharge: 0,
@@ -108,7 +226,6 @@ async function startServer() {
             team,
             name: message.name || "Player",
             color: stats.color || `hsl(${Math.random() * 360}, 70%, 50%)`,
-            skin: stats.skin || "default",
             ws: ws
           };
 
@@ -216,20 +333,7 @@ async function startServer() {
           break;
 
         case "UPGRADE":
-          if (currentRoomId && rooms[currentRoomId].players[playerId]) {
-            const p = rooms[currentRoomId].players[playerId];
-            const cost = 50;
-            if (p.money >= cost) {
-              p.money -= cost;
-              if (message.stat === "speed") p.speed += 0.5;
-              if (message.stat === "damage") p.damage += 2;
-              if (message.stat === "health") {
-                p.maxHealth += 20;
-                p.health = p.maxHealth;
-              }
-              ws.send(JSON.stringify({ type: "UPGRADE_SUCCESS", stat: message.stat }));
-            }
-          }
+          // Removed as stats are gone
           break;
       }
     });
@@ -240,6 +344,10 @@ async function startServer() {
         if (Object.keys(rooms[currentRoomId].players).length === 0) {
           delete rooms[currentRoomId];
         }
+      }
+
+      if (lobbySockets[playerId] === ws) {
+        delete lobbySockets[playerId];
       }
     });
   });
@@ -283,13 +391,10 @@ async function startServer() {
 
               // Death Logic
               if (player.health <= 0) {
-                player.deaths++;
                 player.health = 0; // Stay dead until RESPAWN
                 
                 // Reward Killer
                 if (shooter) {
-                  shooter.kills++;
-                  shooter.money += 100;
                   shooter.superCharge = Math.min(100, shooter.superCharge + 25);
                 }
               }
@@ -340,11 +445,9 @@ async function startServer() {
 
           if (room.scores.team1 >= 2 && !room.winner) {
             room.winner = "team1";
-            playersArr.filter(p => p.team === 1).forEach(p => p.trophies += 10);
           }
           if (room.scores.team2 >= 2 && !room.winner) {
             room.winner = "team2";
-            playersArr.filter(p => p.team === 2).forEach(p => p.trophies += 10);
           }
         }
       }
@@ -357,7 +460,6 @@ async function startServer() {
         if (room.mode === "showdown" || room.mode === "duel") {
           if (alivePlayers.length === 1) {
             room.winner = alivePlayers[0].id;
-            alivePlayers[0].trophies += 10;
           } else if (alivePlayers.length === 0) {
             room.winner = "draw";
           }
@@ -366,10 +468,8 @@ async function startServer() {
           const team2Alive = alivePlayers.some(p => p.team === 2);
           if (!team1Alive) {
             room.winner = "team2";
-            playersArr.filter(p => p.team === 2).forEach(p => p.trophies += 10);
           } else if (!team2Alive) {
             room.winner = "team1";
-            playersArr.filter(p => p.team === 1).forEach(p => p.trophies += 10);
           }
         }
       }
@@ -384,24 +484,16 @@ async function startServer() {
         winner: room.winner,
         playerCount: Object.keys(room.players).length
       });
-      wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(state);
+      Object.values(room.players).forEach((p: any) => {
+        if (p.ws.readyState === WebSocket.OPEN) {
+          p.ws.send(state);
         }
       });
     }
   }, 1000 / 30);
  // 30 FPS updates
 
-  console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode...`);
-
-  // API health check
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", mode: process.env.NODE_ENV || 'development' });
-  });
-
   if (process.env.NODE_ENV !== "production") {
-    console.log("Setting up Vite middleware...");
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -409,7 +501,6 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    console.log("Serving static files from dist...");
     const distPath = path.resolve(__dirname, "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
