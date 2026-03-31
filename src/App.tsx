@@ -19,7 +19,9 @@ import {
   Search,
   UserPlus,
   LogOut,
-  Bell
+  Bell,
+  MessageSquare,
+  Send
 } from "lucide-react";
 
 interface PartyMember {
@@ -110,6 +112,9 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<{ id: string, name: string }[]>([]);
   const [party, setParty] = useState<Party | null>(null);
   const [invites, setInvites] = useState<{ fromId: string, fromName: string }[]>([]);
+  const [onlineCount, setOnlineCount] = useState(0);
+  const [chatMessages, setChatMessages] = useState<{ sender: string, text: string, timestamp: number, scope: string }[]>([]);
+  const [chatInput, setChatInput] = useState("");
   const lobbySocketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -127,13 +132,24 @@ export default function App() {
 
     socket.onopen = () => {
       socket.send(JSON.stringify({ type: "LOBBY_JOIN", name: playerName, playerId: persistentId }));
+      socket.send(JSON.stringify({ type: "SEARCH_PLAYERS", query: "", playerId: persistentId }));
     };
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       switch (data.type) {
+        case "LOBBY_INIT":
+          setOnlineCount(data.onlineCount || 0);
+          break;
+        case "ONLINE_COUNT":
+          setOnlineCount(data.count);
+          break;
         case "SEARCH_RESULTS":
           setSearchResults(data.results);
+          break;
+        case "CHAT_MESSAGE":
+          setChatMessages(prev => [...prev.slice(-49), data]);
+          playSound(400, "sine", 0.05);
           break;
         case "PARTY_INVITE_RECEIVED":
           setInvites(prev => [...prev, { fromId: data.fromId, fromName: data.fromName }]);
@@ -175,6 +191,20 @@ export default function App() {
       lobbySocketRef.current.send(JSON.stringify({ type: "PARTY_LEAVE", playerId: persistentId }));
     }
     setParty(null);
+  };
+
+  const sendChat = (scope: "global" | "room" = "global") => {
+    if (!chatInput.trim()) return;
+    const socket = gameState === "playing" ? socketRef.current : lobbySocketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: "CHAT_MESSAGE",
+        text: chatInput,
+        scope,
+        playerId: persistentId
+      }));
+      setChatInput("");
+    }
   };
 
   const playSound = (freq: number, type: OscillatorType = "square", duration: number = 0.1) => {
@@ -245,6 +275,9 @@ export default function App() {
         setIsDead(false);
         setWinnerId(null);
         setGameStarted(data.mode === "practice");
+      } else if (data.type === "CHAT_MESSAGE") {
+        setChatMessages(prev => [...prev.slice(-49), data]);
+        playSound(400, "sine", 0.05);
       } else if (data.type === "STATE") {
         setGameStarted(data.started);
         setWinnerId(data.winner);
@@ -801,8 +834,8 @@ export default function App() {
                   <div className="flex items-center gap-3 px-6 py-3 bg-black/40 rounded-full border border-white/5">
                     <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
                     <div>
-                      <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Network</p>
-                      <p className="text-sm font-black leading-none">STABLE</p>
+                      <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Players Online</p>
+                      <p className="text-sm font-black leading-none">{onlineCount}</p>
                     </div>
                   </div>
                 </div>
@@ -822,19 +855,19 @@ export default function App() {
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
               {/* Left Column: Profile & Search */}
-              <div className="lg:col-span-4 space-y-6">
-                <div className="bg-white/5 border border-white/10 p-8 rounded-[3rem] backdrop-blur-2xl shadow-2xl relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 p-6 opacity-5 group-hover:opacity-10 transition-opacity">
-                    <Settings className="w-32 h-32" />
+              <div className="lg:col-span-3 space-y-6">
+                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                    <Settings className="w-24 h-24" />
                   </div>
                   
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 mb-8 flex items-center gap-2">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 mb-6 flex items-center gap-2">
                     <User className="w-4 h-4" />
                     Brawler Profile
                   </h3>
 
-                  <div className="space-y-8 relative z-10">
-                    <div className="space-y-3">
+                  <div className="space-y-6 relative z-10">
+                    <div className="space-y-2">
                       <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Identity</label>
                       <div className="relative">
                         <input
@@ -842,58 +875,55 @@ export default function App() {
                           value={playerName}
                           onChange={(e) => setPlayerName(e.target.value)}
                           placeholder="Enter Name"
-                          className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-5 focus:outline-none focus:border-orange-500 transition-all font-black uppercase italic text-2xl tracking-tight placeholder:text-white/10"
+                          className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500 transition-all font-black uppercase italic text-lg tracking-tight placeholder:text-white/10"
                         />
-                        <div className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 bg-orange-500/20 rounded-lg flex items-center justify-center">
-                          <Plus className="w-4 h-4 text-orange-500" />
-                        </div>
                       </div>
                     </div>
 
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                       <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Global Search</label>
                       <div className="relative">
-                        <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-white/20" />
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/20" />
                         <input
                           type="text"
                           value={searchQuery}
                           onChange={(e) => searchPlayers(e.target.value)}
                           placeholder="Search Players..."
-                          className="w-full bg-white/5 border border-white/10 rounded-2xl pl-14 pr-6 py-4 focus:outline-none focus:border-blue-500 transition-all font-bold text-sm tracking-tight placeholder:text-white/10"
+                          className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-3 focus:outline-none focus:border-blue-500 transition-all font-bold text-xs tracking-tight placeholder:text-white/10"
                         />
                       </div>
                       
                       <AnimatePresence>
-                        {searchQuery && (
-                          <motion.div 
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -10 }}
-                            className="bg-black/60 border border-white/10 rounded-2xl overflow-hidden divide-y divide-white/5"
-                          >
-                            {searchResults.length > 0 ? searchResults.map(p => (
-                              <div key={p.id} className="flex items-center justify-between p-4 hover:bg-white/5 transition-colors">
-                                <span className="font-bold text-sm">{p.name}</span>
-                                <button 
-                                  onClick={() => invitePlayer(p.id)}
-                                  className="p-2 bg-blue-500/20 hover:bg-blue-500 text-blue-500 hover:text-white rounded-xl transition-all"
-                                >
-                                  <UserPlus className="w-4 h-4" />
-                                </button>
-                              </div>
-                            )) : (
-                              <div className="p-4 text-center text-white/20 text-xs font-bold uppercase tracking-widest">No Players Found</div>
-                            )}
-                          </motion.div>
-                        )}
+                        <motion.div 
+                          initial={{ opacity: 0, y: -10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -10 }}
+                          className="bg-black/60 border border-white/10 rounded-xl overflow-hidden divide-y divide-white/5"
+                        >
+                          {searchResults.length > 0 ? searchResults.map(p => (
+                            <div key={p.id} className="flex items-center justify-between p-3 hover:bg-white/5 transition-colors">
+                              <span className="font-bold text-xs">{p.name}</span>
+                              <button 
+                                onClick={() => invitePlayer(p.id)}
+                                className="p-1.5 bg-blue-500/20 hover:bg-blue-500 text-blue-500 hover:text-white rounded-lg transition-all"
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )) : (
+                            <div className="p-3 text-center text-white/20 text-[10px] font-bold uppercase tracking-widest">
+                              {searchQuery ? "No Players Found" : "No Players Online"}
+                            </div>
+                          )}
+                        </motion.div>
                       </AnimatePresence>
                     </div>
                   </div>
                 </div>
 
                 {/* Party Section */}
-                <div className="bg-white/5 border border-white/10 p-8 rounded-[3rem] backdrop-blur-2xl shadow-2xl">
-                  <div className="flex items-center justify-between mb-8">
+                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl">
+                  <div className="flex items-center justify-between mb-6">
                     <h3 className="text-[10px] font-black uppercase tracking-widest text-blue-400 flex items-center gap-2">
                       <Users className="w-4 h-4" />
                       Your Party
@@ -905,26 +935,26 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                     {party ? party.members.map(m => (
-                      <div key={m.id} className="flex items-center gap-4 p-4 bg-white/5 rounded-2xl border border-white/5">
-                        <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center font-black text-sm">
+                      <div key={m.id} className="flex items-center gap-3 p-3 bg-white/5 rounded-xl border border-white/5">
+                        <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center font-black text-xs">
                           {m.name[0].toUpperCase()}
                         </div>
                         <div className="flex-1">
-                          <p className="font-bold text-sm">{m.name}</p>
-                          <p className="text-[8px] font-black text-white/20 uppercase tracking-widest">
+                          <p className="font-bold text-xs">{m.name}</p>
+                          <p className="text-[7px] font-black text-white/20 uppercase tracking-widest">
                             {m.id === party.leaderId ? "Party Leader" : "Member"}
                           </p>
                         </div>
-                        {m.id === party.leaderId && <Crown className="w-4 h-4 text-yellow-500" />}
+                        {m.id === party.leaderId && <Crown className="w-3 h-3 text-yellow-500" />}
                       </div>
                     )) : (
-                      <div className="text-center py-8 space-y-4">
-                        <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto">
-                          <Users className="w-8 h-8 text-white/10" />
+                      <div className="text-center py-6 space-y-3">
+                        <div className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center mx-auto">
+                          <Users className="w-6 h-6 text-white/10" />
                         </div>
-                        <p className="text-white/20 text-[10px] font-black uppercase tracking-widest">Solo Queue Active</p>
+                        <p className="text-white/20 text-[8px] font-black uppercase tracking-widest">Solo Queue Active</p>
                       </div>
                     )}
                   </div>
@@ -932,85 +962,137 @@ export default function App() {
               </div>
 
               {/* Middle Column: Game Modes */}
-              <div className="lg:col-span-8 flex flex-col gap-6">
-                <div className="bg-white/5 border border-white/10 p-10 rounded-[3.5rem] backdrop-blur-2xl shadow-2xl flex-1 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 w-96 h-96 bg-orange-500/5 blur-[100px] rounded-full -mr-48 -mt-48" />
+              <div className="lg:col-span-6 flex flex-col gap-6">
+                <div className="bg-white/5 border border-white/10 p-8 rounded-[3rem] backdrop-blur-2xl shadow-2xl flex-1 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-72 h-72 bg-orange-500/5 blur-[80px] rounded-full -mr-36 -mt-36" />
                   
-                  <div className="flex items-center justify-between mb-12 relative z-10">
-                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 flex items-center gap-3">
+                  <div className="flex items-center justify-between mb-8 relative z-10">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 flex items-center gap-2">
                       <Target className="w-4 h-4" />
-                      Select Battle Arena
+                      Battle Arena
                     </h3>
-                    <div className="flex items-center gap-3 px-4 py-2 bg-white/5 rounded-full border border-white/5">
-                      <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                      <span className="text-[10px] font-black text-white/40 uppercase tracking-widest">Servers Operational</span>
+                    <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/5">
+                      <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                      <span className="text-[8px] font-black text-white/40 uppercase tracking-widest">Live</span>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 relative z-10">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 relative z-10">
                     <motion.button
-                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => connect("practice")}
-                      className="group relative bg-white/5 hover:bg-white/10 border border-white/10 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden"
+                      className="group relative bg-white/5 hover:bg-white/10 border border-white/10 p-6 rounded-[2rem] transition-all text-left overflow-hidden"
                     >
-                      <div className="absolute top-0 right-0 p-6 opacity-5 group-hover:opacity-10 transition-opacity">
-                        <Target className="w-32 h-32" />
+                      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                        <Target className="w-24 h-24" />
                       </div>
-                      <div className="w-12 h-12 bg-white/5 rounded-2xl flex items-center justify-center mb-4 group-hover:bg-white/10 transition-colors">
-                        <Play className="w-6 h-6 text-white/40" />
+                      <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center mb-3 group-hover:bg-white/10 transition-colors">
+                        <Play className="w-5 h-5 text-white/40" />
                       </div>
-                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">Practice</h4>
-                      <p className="text-white/40 text-sm font-medium">Refine your skills against advanced AI bots in a safe environment.</p>
+                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Practice</h4>
+                      <p className="text-white/40 text-[10px] font-medium leading-tight">Refine your skills against advanced AI bots.</p>
                     </motion.button>
 
                     <motion.button
-                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => connect("showdown")}
-                      className="group relative bg-gradient-to-br from-orange-500 to-red-600 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-orange-500/20"
+                      className="group relative bg-gradient-to-br from-orange-500 to-red-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-orange-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-6 opacity-20">
-                        <Flame className="w-32 h-32" />
+                      <div className="absolute top-0 right-0 p-4 opacity-20">
+                        <Flame className="w-24 h-24" />
                       </div>
-                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
-                        <Zap className="w-6 h-6 text-white" />
+                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
+                        <Zap className="w-5 h-5 text-white" />
                       </div>
-                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">Showdown</h4>
-                      <p className="text-white/70 text-sm font-medium">The ultimate test. 10 players, one winner. Survival of the fittest.</p>
+                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Showdown</h4>
+                      <p className="text-white/70 text-[10px] font-medium leading-tight">10 players, one winner. Survival of the fittest.</p>
                     </motion.button>
 
                     <motion.button
-                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => connect("duel")}
-                      className="group relative bg-gradient-to-br from-purple-600 to-indigo-800 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-purple-500/20"
+                      className="group relative bg-gradient-to-br from-purple-600 to-indigo-800 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-purple-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-6 opacity-20">
-                        <Sword className="w-32 h-32" />
+                      <div className="absolute top-0 right-0 p-4 opacity-20">
+                        <Sword className="w-24 h-24" />
                       </div>
-                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
-                        <Shield className="w-6 h-6 text-white" />
+                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
+                        <Shield className="w-5 h-5 text-white" />
                       </div>
-                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">1v1 Duel</h4>
-                      <p className="text-white/70 text-sm font-medium">Pure mechanical skill. Face off against a single opponent.</p>
+                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Duel</h4>
+                      <p className="text-white/70 text-[10px] font-medium leading-tight">Intense 1v1 combat. Pure skill, no distractions.</p>
                     </motion.button>
 
                     <motion.button
-                      whileHover={{ scale: 1.02, y: -5 }}
+                      whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => connect("brawlball")}
-                      className="group relative bg-gradient-to-br from-blue-600 to-cyan-700 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-blue-500/20"
+                      className="group relative bg-gradient-to-br from-blue-600 to-cyan-700 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-blue-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-6 opacity-20">
-                        <Gamepad2 className="w-32 h-32" />
+                      <div className="absolute top-0 right-0 p-4 opacity-20">
+                        <Gamepad2 className="w-24 h-24" />
                       </div>
-                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
-                        <Trophy className="w-6 h-6 text-white" />
+                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
+                        <Trophy className="w-5 h-5 text-white" />
                       </div>
-                      <h4 className="text-3xl font-black uppercase italic tracking-tighter mb-2">Brawl Ball</h4>
-                      <p className="text-white/70 text-sm font-medium">Teamwork makes the dream work. Score goals to dominate.</p>
+                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Brawl Ball</h4>
+                      <p className="text-white/70 text-[10px] font-medium leading-tight">Teamwork makes the dream work. Score goals.</p>
                     </motion.button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Column: Chat */}
+              <div className="lg:col-span-3 flex flex-col gap-6">
+                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl flex-1 flex flex-col overflow-hidden">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-green-400 mb-6 flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4" />
+                    Global Chat
+                  </h3>
+
+                  <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-2 scrollbar-hide">
+                    {chatMessages.filter(m => m.scope === "global").length > 0 ? (
+                      chatMessages.filter(m => m.scope === "global").map((m, i) => (
+                        <div key={i} className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className={`text-[9px] font-black uppercase tracking-tighter ${(m as any).senderId === persistentId ? "text-orange-500" : "text-white/40"}`}>
+                              {m.sender}
+                            </span>
+                            <span className="text-[7px] text-white/20 font-bold">
+                              {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                          <p className="text-xs font-medium text-white/80 leading-relaxed bg-white/5 p-3 rounded-2xl rounded-tl-none border border-white/5">
+                            {m.text}
+                          </p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-center space-y-4 opacity-20">
+                        <MessageSquare className="w-12 h-12" />
+                        <p className="text-[10px] font-black uppercase tracking-widest">No messages yet</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && sendChat("global")}
+                      placeholder="Type message..."
+                      className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 pr-12 focus:outline-none focus:border-green-500 transition-all font-bold text-xs placeholder:text-white/10"
+                    />
+                    <button 
+                      onClick={() => sendChat("global")}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-green-500 hover:text-white transition-colors"
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1112,6 +1194,36 @@ export default function App() {
                       initial={{ width: 0 }}
                       animate={{ width: `${currentPlayer?.superCharge || 0}%` }}
                     />
+                  </div>
+                </div>
+
+                {/* In-Game Chat */}
+                <div className="w-64 h-48 bg-black/40 backdrop-blur-md border border-white/5 rounded-2xl flex flex-col overflow-hidden pointer-events-auto">
+                  <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-hide">
+                    {chatMessages.filter(m => m.scope === "room").map((m, i) => (
+                      <div key={i} className="text-[10px]">
+                        <span className={`font-black uppercase tracking-tighter mr-2 ${(m as any).senderId === persistentId ? "text-orange-500" : "text-white/40"}`}>
+                          {m.sender}:
+                        </span>
+                        <span className="text-white/80 font-medium leading-tight">{m.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="p-2 bg-black/20 border-t border-white/5 relative">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && sendChat("room")}
+                      placeholder="Team Chat..."
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 pr-8 focus:outline-none focus:border-orange-500 transition-all text-[10px] font-bold placeholder:text-white/10"
+                    />
+                    <button 
+                      onClick={() => sendChat("room")}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-white/20 hover:text-orange-500 transition-colors"
+                    >
+                      <Send className="w-3 h-3" />
+                    </button>
                   </div>
                 </div>
               </div>

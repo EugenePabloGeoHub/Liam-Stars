@@ -17,7 +17,7 @@ async function startServer() {
   // Game State
   const rooms: Record<string, any> = {};
   const allPlayers: Record<string, { id: string, name: string, partyId: string | null }> = {};
-  const lobbySockets: Record<string, WebSocket> = {};
+  const lobbyConnections: Record<string, { ws: WebSocket, playerId: string }> = {};
   const parties: Record<string, { id: string, leaderId: string, members: string[] }> = {};
 
   const MODE_CONFIGS: Record<string, { players: number, teams: boolean, hasBall?: boolean }> = {
@@ -63,16 +63,18 @@ async function startServer() {
     });
 
     party.members.forEach(mId => {
-      const ws = lobbySockets[mId];
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(partyUpdate);
-      }
+      Object.values(lobbyConnections).forEach(conn => {
+        if (conn.playerId === mId && conn.ws.readyState === WebSocket.OPEN) {
+          conn.ws.send(partyUpdate);
+        }
+      });
     });
   };
 
   wss.on("connection", (ws: WebSocket) => {
     let currentRoomId: string | null = null;
     let playerId: string = nanoid();
+    const connectionId = nanoid();
 
     ws.on("message", (data: string) => {
       const message = JSON.parse(data.toString());
@@ -85,27 +87,69 @@ async function startServer() {
           } else {
             allPlayers[playerId].name = message.name;
           }
-          lobbySockets[playerId] = ws;
-          ws.send(JSON.stringify({ type: "LOBBY_INIT", playerId }));
+          lobbyConnections[connectionId] = { ws, playerId };
           
+          const onlinePlayerIds = new Set(Object.values(lobbyConnections).map(c => c.playerId));
+          ws.send(JSON.stringify({ 
+            type: "LOBBY_INIT", 
+            playerId,
+            onlineCount: onlinePlayerIds.size
+          }));
+          
+          // Broadcast new count to all lobby members
+          const countUpdate = JSON.stringify({ type: "ONLINE_COUNT", count: onlinePlayerIds.size });
+          Object.values(lobbyConnections).forEach(conn => {
+            if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(countUpdate);
+          });
+
           // If already in a party, send update
           if (allPlayers[playerId].partyId) {
             broadcastPartyUpdate(allPlayers[playerId].partyId!);
           }
           break;
 
+        case "CHAT_MESSAGE":
+          const chatMsg = JSON.stringify({
+            type: "CHAT_MESSAGE",
+            sender: allPlayers[playerId]?.name || "Unknown",
+            senderId: playerId,
+            text: message.text,
+            timestamp: Date.now(),
+            scope: message.scope || "global" // "global" or "room"
+          });
+
+          if (message.scope === "room" && currentRoomId && rooms[currentRoomId]) {
+            Object.values(rooms[currentRoomId].players).forEach((p: any) => {
+              if (p.ws.readyState === WebSocket.OPEN) p.ws.send(chatMsg);
+            });
+          } else {
+            // Global lobby chat
+            Object.values(lobbyConnections).forEach(conn => {
+              if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(chatMsg);
+            });
+          }
+          break;
+
         case "SEARCH_PLAYERS":
-          const query = message.query.toLowerCase();
+          const query = (message.query || "").toLowerCase();
+          const onlinePlayerIds = new Set(Object.values(lobbyConnections).map(c => c.playerId));
+          console.log(`[Search] Player ${playerId} searching for "${query}". Online players: ${onlinePlayerIds.size}`);
           const results = Object.values(allPlayers)
-            .filter(p => p.name.toLowerCase().includes(query) && p.id !== playerId && lobbySockets[p.id])
+            .filter(p => {
+              const isOnline = onlinePlayerIds.has(p.id);
+              if (!isOnline) return false;
+              if (p.id === playerId) return false;
+              if (!query) return true;
+              return p.name.toLowerCase().includes(query);
+            })
             .map(p => ({ id: p.id, name: p.name }));
           ws.send(JSON.stringify({ type: "SEARCH_RESULTS", results }));
           break;
 
         case "PARTY_INVITE":
-          const targetWs = lobbySockets[message.targetId];
-          if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-            targetWs.send(JSON.stringify({ 
+          const targetConn = Object.values(lobbyConnections).find(c => c.playerId === message.targetId);
+          if (targetConn && targetConn.ws.readyState === WebSocket.OPEN) {
+            targetConn.ws.send(JSON.stringify({ 
               type: "PARTY_INVITE_RECEIVED", 
               fromId: playerId, 
               fromName: allPlayers[playerId]?.name 
@@ -160,13 +204,21 @@ async function startServer() {
           const partyMembers = isLeader ? parties[partyIdJoin].members : [playerId];
           const partySize = partyMembers.length;
           
+          console.log(`[Matchmaking] Player ${playerId} (Name: ${allPlayers[playerId]?.name}) joining ${mode}. PartySize: ${partySize}. Requested Room: ${message.roomId}`);
+
           if (mode !== "practice") {
-            // Find a room for this mode that hasn't started and has enough space for the whole party
-            currentRoomId = Object.keys(rooms).find(id => 
-              rooms[id].mode === mode && 
-              !rooms[id].started && 
-              (Object.keys(rooms[id].players).length + partySize) <= config.players
-            ) || `${mode}_${nanoid(5)}`;
+            // If a specific roomId is provided (e.g. from a party leader), join it regardless of "started" status
+            // to ensure party members stay together. The leader's check ensures there is space.
+            if (message.roomId && rooms[message.roomId]) {
+              currentRoomId = message.roomId;
+            } else {
+              // Find a room for this mode that hasn't started and has enough space for the whole party
+              currentRoomId = Object.keys(rooms).find(id => 
+                rooms[id].mode === mode && 
+                !rooms[id].started && 
+                (Object.keys(rooms[id].players).length + partySize) <= config.players
+              ) || `${mode}_${nanoid(5)}`;
+            }
           } else {
             currentRoomId = message.roomId || "default";
           }
@@ -191,14 +243,16 @@ async function startServer() {
           if (isLeader) {
             partyMembers.forEach(mId => {
               if (mId !== playerId) {
-                const mWs = lobbySockets[mId];
-                if (mWs && mWs.readyState === WebSocket.OPEN) {
-                  mWs.send(JSON.stringify({
-                    type: "GAME_START_REQUEST",
-                    mode,
-                    roomId: currentRoomId
-                  }));
-                }
+                const mConns = Object.values(lobbyConnections).filter(c => c.playerId === mId);
+                mConns.forEach(conn => {
+                  if (conn.ws.readyState === WebSocket.OPEN) {
+                    conn.ws.send(JSON.stringify({
+                      type: "GAME_START_REQUEST",
+                      mode,
+                      roomId: currentRoomId
+                    }));
+                  }
+                });
               }
             });
           }
@@ -346,8 +400,14 @@ async function startServer() {
         }
       }
 
-      if (lobbySockets[playerId] === ws) {
-        delete lobbySockets[playerId];
+      if (lobbyConnections[connectionId]) {
+        delete lobbyConnections[connectionId];
+        // Broadcast new count
+        const onlinePlayerIds = new Set(Object.values(lobbyConnections).map(c => c.playerId));
+        const countUpdate = JSON.stringify({ type: "ONLINE_COUNT", count: onlinePlayerIds.size });
+        Object.values(lobbyConnections).forEach(conn => {
+          if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(countUpdate);
+        });
       }
     });
   });
