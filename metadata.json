@@ -1,5 +1,5 @@
 {
-  "name": "Liam Stars",
+  "name": "LiamStars",
   "description": "A real-time multiplayer top-down shooter game inspired by Brawl Stars.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["microphone"]
 }

@@ -10,10 +10,15 @@ export default defineConfig(({mode}) => {
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      global: 'window',
+      process: 'window.process',
+      Buffer: 'window.Buffer',
     },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
+        buffer: 'buffer/',
+        process: 'process/browser',
       },
     },
     server: {
