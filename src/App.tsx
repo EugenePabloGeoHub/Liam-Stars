@@ -78,8 +78,8 @@ export default function App() {
   const [roomId, setRoomId] = useState("");
 
   // Player Stats
-  const [xp, setXp] = useState(0);
-  const [level, setLevel] = useState(1);
+  const [xp, setXp] = useState(() => Number(localStorage.getItem("xp")) || 0);
+  const [level, setLevel] = useState(() => Number(localStorage.getItem("level")) || 1);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [neonColor, setNeonColor] = useState(() => localStorage.getItem("neonColor") || "orange");
   const [isAudioEnabled, setIsAudioEnabled] = useState(() => localStorage.getItem("isAudioEnabled") !== "false");
@@ -102,6 +102,7 @@ export default function App() {
   const peersRef = useRef<Record<string, any>>({});
   const audioRefs = useRef<Record<string, HTMLAudioElement>>({});
   const [onlineCount, setOnlineCount] = useState(0);
+  const [isOffline, setIsOffline] = useState(true);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedAudioDevice, setSelectedAudioDevice] = useState(() => localStorage.getItem("selectedAudioDevice") || "");
   const [chatMessages, setChatMessages] = useState<{ sender: string, text: string, timestamp: number, scope: string }[]>([]);
@@ -130,6 +131,11 @@ export default function App() {
   }, [selectedAudioDevice]);
 
   useEffect(() => {
+    localStorage.setItem("xp", xp.toString());
+    localStorage.setItem("level", level.toString());
+  }, [xp, level]);
+
+  useEffect(() => {
     localStorage.setItem("playerName", playerName);
     if (gameState === "lobby") {
       connectLobby();
@@ -149,8 +155,17 @@ export default function App() {
     lobbySocketRef.current = socket;
 
     socket.onopen = () => {
+      setIsOffline(false);
       socket.send(JSON.stringify({ type: "LOBBY_JOIN", name: playerName, playerId: persistentId }));
       socket.send(JSON.stringify({ type: "SEARCH_PLAYERS", query: "", playerId: persistentId }));
+    };
+
+    socket.onclose = () => {
+      setIsOffline(true);
+    };
+
+    socket.onerror = () => {
+      setIsOffline(true);
     };
 
     socket.onmessage = (event) => {
@@ -268,6 +283,17 @@ export default function App() {
   };
 
   const updateHighScore = (game: string, score: number, earnedXp: number) => {
+    // Local XP/Level update for offline compatibility
+    setXp(prev => {
+      const newXp = prev + earnedXp;
+      const nextLevelXp = level * 1000;
+      if (newXp >= nextLevelXp) {
+        setLevel(l => l + 1);
+        return newXp - nextLevelXp;
+      }
+      return newXp;
+    });
+
     if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
       lobbySocketRef.current.send(JSON.stringify({
         type: "HIGH_SCORE_UPDATE",
@@ -456,6 +482,14 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* Offline Mode Indicator */}
+      {isOffline && (
+        <div className="fixed top-4 right-4 z-[200] bg-red-500/20 border border-red-500/50 px-4 py-2 rounded-full backdrop-blur-md flex items-center gap-2">
+          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+          <span className="text-[10px] font-black uppercase tracking-widest text-red-500">Offline Mode</span>
+        </div>
+      )}
 
       {/* Persistent Voice Overlay */}
       {voiceRoomId && (
