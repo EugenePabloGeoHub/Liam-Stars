@@ -1,5 +1,5 @@
 import express from "express";
-import { WebSocketServer, WebSocket } from "ws";
+import { Server } from "socket.io";
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -10,160 +10,119 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const server = createServer(app);
-  const wss = new WebSocketServer({ server });
+  const httpServer = createServer(app);
+  const io = new Server(httpServer, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"]
+    }
+  });
   const PORT = Number(process.env.PORT) || 3000;
 
   // State
-  const allPlayers: Record<string, { id: string, name: string }> = {};
-  const lobbyConnections: Record<string, { ws: WebSocket, playerId: string }> = {};
+  const allPlayers: Record<string, { id: string, name: string, photoURL?: string, isSpeaking?: boolean, isMuted?: boolean }> = {};
+  const playerSocketId: Record<string, string> = {}; // playerId -> socketId
+  const socketPlayerId: Record<string, string> = {}; // socketId -> playerId
   const voiceRooms: Record<string, Set<string>> = {}; // roomId -> Set of playerIds
-  const playerVoiceRoom: Record<string, string> = {}; // playerId -> roomId
 
   const broadcastLobbyUpdate = () => {
-    const onlinePlayerIds = new Set(Object.values(lobbyConnections).map(c => c.playerId));
-    const lobbyData = JSON.stringify({
-      type: "LOBBY_UPDATE",
-      onlineCount: onlinePlayerIds.size
-    });
-
-    Object.values(lobbyConnections).forEach(conn => {
-      if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(lobbyData);
+    const onlinePlayers = Object.values(allPlayers).filter(p => playerSocketId[p.id]);
+    io.emit("LOBBY_UPDATE", {
+      onlineCount: onlinePlayers.length,
+      players: onlinePlayers
     });
   };
 
-  wss.on("connection", (ws: WebSocket) => {
-    let playerId: string = nanoid();
-    const connectionId = nanoid();
+  io.on("connection", (socket) => {
+    let playerId: string = "";
 
-    ws.on("message", (data: string) => {
-      const message = JSON.parse(data.toString());
-      if (message.playerId) playerId = message.playerId;
+    socket.on("LOBBY_JOIN", (data: { playerId: string, name: string, photoURL?: string }) => {
+      playerId = data.playerId;
+      socketPlayerId[socket.id] = playerId;
+      playerSocketId[playerId] = socket.id;
 
-      switch (message.type) {
-        case "LOBBY_JOIN":
-          if (!allPlayers[playerId]) {
-            allPlayers[playerId] = { 
-              id: playerId, 
-              name: message.name
-            };
-          } else {
-            allPlayers[playerId].name = message.name;
-          }
-          lobbyConnections[connectionId] = { ws, playerId };
-          
-          ws.send(JSON.stringify({ 
-            type: "LOBBY_INIT", 
-            playerId,
-            player: allPlayers[playerId]
-          }));
-          
-          broadcastLobbyUpdate();
-          break;
+      allPlayers[playerId] = { 
+        id: playerId, 
+        name: data.name,
+        photoURL: data.photoURL,
+        isSpeaking: false,
+        isMuted: false
+      };
+      
+      socket.emit("LOBBY_INIT", { 
+        playerId,
+        player: allPlayers[playerId]
+      });
+      
+      broadcastLobbyUpdate();
+    });
 
-        case "CHAT_MESSAGE":
-          const chatMsg = JSON.stringify({
-            type: "CHAT_MESSAGE",
-            sender: allPlayers[playerId]?.name || "Unknown",
-            senderId: playerId,
-            text: message.text,
-            timestamp: Date.now(),
-            scope: message.scope || "global"
-          });
+    socket.on("CHAT_MESSAGE", (data: { text: string, scope?: string }) => {
+      if (!playerId) return;
+      io.emit("CHAT_MESSAGE", {
+        sender: allPlayers[playerId]?.name || "Unknown",
+        senderId: playerId,
+        text: data.text,
+        timestamp: Date.now(),
+        scope: data.scope || "global"
+      });
+    });
 
-          Object.values(lobbyConnections).forEach(conn => {
-            if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(chatMsg);
-          });
-          break;
+    socket.on("VOICE_JOIN", (data: { roomId: string }) => {
+      if (!playerId) return;
+      const vRoomId = data.roomId || "public";
+      console.log(`[Voice] Player ${playerId} joining room: ${vRoomId}`);
+      
+      // Leave previous room if any
+      const oldRoomId = Object.keys(voiceRooms).find(rid => voiceRooms[rid].has(playerId));
+      if (oldRoomId) {
+        voiceRooms[oldRoomId].delete(playerId);
+        socket.to(oldRoomId).emit("VOICE_PEER_LEFT", { peerId: playerId });
+        socket.leave(oldRoomId);
+      }
 
-        case "VOICE_JOIN":
-          const vRoomId = message.roomId || "public";
-          console.log(`[Voice] Player ${playerId} joining room: ${vRoomId}`);
-          
-          // Leave previous room if any
-          if (playerVoiceRoom[playerId]) {
-            const oldRoomId = playerVoiceRoom[playerId];
-            voiceRooms[oldRoomId]?.delete(playerId);
-            voiceRooms[oldRoomId]?.forEach(pId => {
-              Object.values(lobbyConnections).forEach(conn => {
-                if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
-                  conn.ws.send(JSON.stringify({ type: "VOICE_PEER_LEFT", peerId: playerId }));
-                }
-              });
-            });
-          }
+      if (!voiceRooms[vRoomId]) voiceRooms[vRoomId] = new Set();
+      voiceRooms[vRoomId].add(playerId);
+      socket.join(vRoomId);
 
-          if (!voiceRooms[vRoomId]) voiceRooms[vRoomId] = new Set();
-          voiceRooms[vRoomId].add(playerId);
-          playerVoiceRoom[playerId] = vRoomId;
+      // Notify others in new room
+      socket.to(vRoomId).emit("VOICE_PEER_JOINED", { peerId: playerId });
 
-          // Notify others in new room
-          voiceRooms[vRoomId].forEach(pId => {
-            if (pId !== playerId) {
-              Object.values(lobbyConnections).forEach(conn => {
-                if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
-                  conn.ws.send(JSON.stringify({ type: "VOICE_PEER_JOINED", peerId: playerId }));
-                }
-              });
-            }
-          });
+      // Send current peers to the joining player
+      const peers = Array.from(voiceRooms[vRoomId]).filter(id => id !== playerId);
+      socket.emit("VOICE_JOIN_SUCCESS", { roomId: vRoomId, peers });
+      
+      broadcastLobbyUpdate();
+    });
 
-          // Send current peers to the joining player
-          const peers = Array.from(voiceRooms[vRoomId]).filter(id => id !== playerId);
-          ws.send(JSON.stringify({ type: "VOICE_JOIN_SUCCESS", roomId: vRoomId, peers }));
-          break;
-
-        case "VOICE_SIGNAL":
-          Object.values(lobbyConnections).forEach(conn => {
-            if (conn.playerId === message.targetId && conn.ws.readyState === WebSocket.OPEN) {
-              conn.ws.send(JSON.stringify({ 
-                type: "VOICE_SIGNAL", 
-                senderId: playerId, 
-                signal: message.signal 
-              }));
-            }
-          });
-          break;
-
-        case "VOICE_LEAVE":
-          if (playerVoiceRoom[playerId]) {
-            const vRoomId = playerVoiceRoom[playerId];
-            voiceRooms[vRoomId]?.delete(playerId);
-            delete playerVoiceRoom[playerId];
-            
-            voiceRooms[vRoomId]?.forEach(pId => {
-              Object.values(lobbyConnections).forEach(conn => {
-                if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
-                  conn.ws.send(JSON.stringify({ type: "VOICE_PEER_LEFT", peerId: playerId }));
-                }
-              });
-            });
-          }
-          break;
+    socket.on("VOICE_SIGNAL", (data: { targetId: string, signal: any }) => {
+      const targetSocketId = playerSocketId[data.targetId];
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("VOICE_SIGNAL", { 
+          senderId: playerId, 
+          signal: data.signal 
+        });
       }
     });
 
-    ws.on("close", () => {
-      if (playerVoiceRoom[playerId]) {
-        const vRoomId = playerVoiceRoom[playerId];
-        voiceRooms[vRoomId]?.delete(playerId);
-        delete playerVoiceRoom[playerId];
-        voiceRooms[vRoomId]?.forEach(pId => {
-          Object.values(lobbyConnections).forEach(conn => {
-            if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
-              conn.ws.send(JSON.stringify({ type: "VOICE_PEER_LEFT", peerId: playerId }));
-            }
-          });
-        });
-      }
+    socket.on("VOICE_STATE", (data: { isMuted?: boolean, isSpeaking?: boolean }) => {
+      if (!playerId || !allPlayers[playerId]) return;
+      if (data.isMuted !== undefined) allPlayers[playerId].isMuted = data.isMuted;
+      if (data.isSpeaking !== undefined) allPlayers[playerId].isSpeaking = data.isSpeaking;
+      broadcastLobbyUpdate();
+    });
 
-      if (lobbyConnections[connectionId]) {
-        delete lobbyConnections[connectionId];
-        const onlinePlayerIds = new Set(Object.values(lobbyConnections).map(c => c.playerId));
-        const countUpdate = JSON.stringify({ type: "ONLINE_COUNT", count: onlinePlayerIds.size });
-        Object.values(lobbyConnections).forEach(conn => {
-          if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(countUpdate);
-        });
+    socket.on("disconnect", () => {
+      if (playerId) {
+        const roomId = Object.keys(voiceRooms).find(rid => voiceRooms[rid].has(playerId));
+        if (roomId) {
+          voiceRooms[roomId].delete(playerId);
+          io.to(roomId).emit("VOICE_PEER_LEFT", { peerId: playerId });
+        }
+        delete playerSocketId[playerId];
+        delete socketPlayerId[socket.id];
+        // We keep allPlayers for history but they are "offline" if no socketId
+        broadcastLobbyUpdate();
       }
     });
   });
@@ -183,7 +142,7 @@ async function startServer() {
     });
   }
 
-  server.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }

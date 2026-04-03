@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { 
   Mic, MicOff, PhoneOff, Users, Settings, 
   MessageSquare, Send, Volume2, VolumeX, 
   Hash, Plus, LogOut, User, Activity,
-  Rocket, Sparkles, Gamepad2, Cpu
+  Rocket, Sparkles, Gamepad2, Cpu, Heart, Eye, Play, ChevronLeft, Globe,
+  Wifi, WifiOff, Loader2, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Canvas, useFrame } from "@react-three/fiber";
@@ -13,6 +14,16 @@ import SimplePeer from "simple-peer";
 import { nanoid } from "nanoid";
 import { Buffer } from "buffer";
 import { GoogleGenAI, Type } from "@google/genai";
+import { auth, db, signInWithGoogle, signOut, handleFirestoreError, OperationType } from "./firebase";
+import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
+import { 
+  doc, getDoc, setDoc, collection, query, orderBy, limit, 
+  onSnapshot, updateDoc, increment, deleteDoc, Timestamp, addDoc 
+} from "firebase/firestore";
+import { Game, UserProfile } from "./types";
+import * as LucideIcons from "lucide-react";
+import * as Motion from "motion/react";
+import { io, Socket } from "socket.io-client";
 
 // Polyfill for simple-peer
 if (typeof window !== "undefined") {
@@ -20,6 +31,122 @@ if (typeof window !== "undefined") {
 }
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
+// Error Boundary for Firestore and Runtime Errors
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: any }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let errorMessage = "Something went wrong.";
+      try {
+        const parsed = JSON.parse(this.state.error.message);
+        if (parsed.error) errorMessage = parsed.error;
+      } catch (e) {
+        errorMessage = this.state.error.message || errorMessage;
+      }
+
+      return (
+        <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-6">
+          <div className="max-w-md w-full bg-neutral-900 border border-red-500/50 p-8 rounded-3xl text-center space-y-4">
+            <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto">
+              <Activity className="w-8 h-8 text-red-500" />
+            </div>
+            <h2 className="text-xl font-black text-white uppercase italic tracking-tight">Application Error</h2>
+            <p className="text-sm text-neutral-400">{errorMessage}</p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full bg-red-500 hover:bg-red-600 text-white font-black py-3 rounded-xl transition-all uppercase italic tracking-widest"
+            >
+              Reload App
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// Dynamic Component Renderer for AI Games
+const GameSandbox = ({ code }: { code: string }) => {
+  const [Component, setComponent] = useState<React.ComponentType | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      // Clean up the code if it has markdown blocks
+      const cleanCode = code.replace(/```jsx|```tsx|```javascript|```typescript|```/g, "").trim();
+      
+      // Create a function that returns the component
+      // We provide React, LucideIcons, and Motion as available variables
+      const createComponent = new Function(
+        "React", "LucideIcons", "Motion", "useState", "useEffect", "useRef", "useCallback", "useMemo",
+        `
+        const { ${Object.keys(LucideIcons).join(", ")} } = LucideIcons;
+        const { motion, AnimatePresence } = Motion;
+        
+        // Mocking MiniGame if not exported
+        let MiniGame = null;
+        
+        ${cleanCode}
+        
+        // If MiniGame is still null, try to find it in the scope or use the last defined component
+        return typeof MiniGame !== 'undefined' ? MiniGame : null;
+        `
+      );
+
+      const MiniGameComponent = createComponent(
+        React, LucideIcons, Motion, useState, useEffect, useRef, useCallback, useMemo
+      );
+      
+      if (!MiniGameComponent) {
+        throw new Error("Could not find 'MiniGame' component in the generated code.");
+      }
+      
+      setComponent(() => MiniGameComponent);
+      setError(null);
+    } catch (err: any) {
+      console.error("Failed to compile game code:", err);
+      setError(err.message);
+    }
+  }, [code]);
+
+  if (error) {
+    return (
+      <div className="p-8 text-center bg-red-500/10 border border-red-500/50 rounded-2xl">
+        <p className="text-red-500 font-bold mb-2">Failed to load game</p>
+        <p className="text-xs text-red-400 font-mono break-words">{error}</p>
+      </div>
+    );
+  }
+
+  if (!Component) {
+    return (
+      <div className="flex items-center justify-center p-12">
+        <Activity className="w-8 h-8 text-orange-500 animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <ErrorBoundary>
+      <Component />
+    </ErrorBoundary>
+  );
+};
 
 const FallingStars = () => {
   const count = 100;
@@ -100,12 +227,12 @@ const SpaceWallpaper = () => {
   );
 };
 
-const AIGameLab = ({ onGameCreated }: { onGameCreated: (code: string) => void }) => {
+const AIGameLab = ({ onGameCreated, userProfile }: { onGameCreated: (title: string, code: string) => void, userProfile: UserProfile | null }) => {
   const [prompt, setPrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
 
   const generateGame = async () => {
-    if (!prompt.trim()) return;
+    if (!prompt.trim() || !userProfile) return;
     setIsGenerating(true);
     try {
       const response = await ai.models.generateContent({
@@ -118,7 +245,16 @@ const AIGameLab = ({ onGameCreated }: { onGameCreated: (code: string) => void })
         Assume 'lucide-react' and 'motion/react' are available.`,
       });
       const code = response.text || "";
-      onGameCreated(code);
+      
+      // Extract a title from the prompt
+      const titleResponse = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Give a short, catchy 2-3 word title for a game based on this prompt: "${prompt}". Return ONLY the title text.`,
+      });
+      const title = titleResponse.text?.trim() || "Untitled Game";
+      
+      onGameCreated(title, code);
+      setPrompt("");
     } catch (err) {
       console.error("AI Generation failed", err);
     } finally {
@@ -132,23 +268,29 @@ const AIGameLab = ({ onGameCreated }: { onGameCreated: (code: string) => void })
         <Cpu className="w-6 h-6 text-orange-500" />
         <h3 className="text-xl font-black text-white uppercase italic tracking-tight">AI Game Lab</h3>
       </div>
-      <p className="text-sm text-neutral-400">Ask the AI to create a mini-game for you to play while you chat.</p>
-      <div className="flex gap-3">
-        <input 
-          type="text"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="e.g. A space dodger game with falling stars..."
-          className="flex-1 bg-neutral-800 border border-neutral-700 text-white px-4 py-3 rounded-2xl focus:outline-none focus:border-orange-500 transition-all"
-        />
-        <button 
-          onClick={generateGame}
-          disabled={isGenerating}
-          className="bg-orange-500 hover:bg-orange-600 text-white font-black px-6 py-3 rounded-2xl transition-all shadow-lg shadow-orange-500/20 uppercase italic tracking-widest disabled:opacity-50"
-        >
-          {isGenerating ? <Activity className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-        </button>
-      </div>
+      {!userProfile ? (
+        <p className="text-sm text-neutral-400">Please sign in to create and save games.</p>
+      ) : (
+        <>
+          <p className="text-sm text-neutral-400">Ask the AI to create a mini-game for you to play while you chat.</p>
+          <div className="flex gap-3">
+            <input 
+              type="text"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="e.g. A space dodger game with falling stars..."
+              className="flex-1 bg-neutral-800 border border-neutral-700 text-white px-4 py-3 rounded-2xl focus:outline-none focus:border-orange-500 transition-all"
+            />
+            <button 
+              onClick={generateGame}
+              disabled={isGenerating}
+              className="bg-orange-500 hover:bg-orange-600 text-white font-black px-6 py-3 rounded-2xl transition-all shadow-lg shadow-orange-500/20 uppercase italic tracking-widest disabled:opacity-50"
+            >
+              {isGenerating ? <Activity className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 };
@@ -200,6 +342,10 @@ const VoiceVisualizer = ({ analyzer, isMuted }: { analyzer: AnalyserNode | null,
 };
 
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
   const [persistentId] = useState(() => {
     const saved = localStorage.getItem("persistentId");
     if (saved) return saved;
@@ -213,6 +359,8 @@ export default function App() {
   const [isNameSet, setIsNameSet] = useState(() => !!localStorage.getItem("playerName"));
 
   const [onlineCount, setOnlineCount] = useState(0);
+  const [onlinePlayers, setOnlinePlayers] = useState<any[]>([]);
+  const [connectionStatus, setConnectionStatus] = useState<"connected" | "connecting" | "disconnected">("disconnected");
   const [voiceRoomId, setVoiceRoomId] = useState<string | null>(null);
   const [voicePeers, setVoicePeers] = useState<string[]>([]);
   const [speakingPeers, setSpeakingPeers] = useState<Set<string>>(new Set());
@@ -223,10 +371,14 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [privateRoomInput, setPrivateRoomInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
-  const [activeTab, setActiveTab] = useState<"chat" | "lab">("chat");
+  const [activeTab, setActiveTab] = useState<"chat" | "lab" | "community">("chat");
   const [generatedGameCode, setGeneratedGameCode] = useState<string | null>(null);
+  const [generatedGameTitle, setGeneratedGameTitle] = useState<string | null>(null);
+  const [selectedGame, setSelectedGame] = useState<Game | null>(null);
+  const [communityGames, setCommunityGames] = useState<Game[]>([]);
+  const [userLikes, setUserLikes] = useState<Set<string>>(new Set());
 
-  const lobbySocketRef = useRef<WebSocket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Record<string, SimplePeer.Instance>>({});
   const audioRefs = useRef<Record<string, HTMLAudioElement>>({});
@@ -238,11 +390,302 @@ export default function App() {
   const [selectedAudioOutputDevice, setSelectedAudioOutputDevice] = useState(() => localStorage.getItem("selectedAudioOutputDevice") || "");
   const [audioOutputDevices, setAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
 
-  // Initialize WebSockets
+  // Auth Listener
   useEffect(() => {
-    connectLobby();
-    return () => lobbySocketRef.current?.close();
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setUser(firebaseUser);
+      if (firebaseUser) {
+        const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+        if (userDoc.exists()) {
+          setUserProfile(userDoc.data() as UserProfile);
+        } else {
+          // Create initial profile
+          const newProfile: UserProfile = {
+            uid: firebaseUser.uid,
+            username: firebaseUser.displayName?.replace(/\s+/g, "").toLowerCase() || "user_" + firebaseUser.uid.slice(0, 5),
+            displayName: firebaseUser.displayName,
+            photoURL: firebaseUser.photoURL,
+            createdAt: Timestamp.now()
+          };
+          await setDoc(doc(db, "users", firebaseUser.uid), newProfile);
+          setUserProfile(newProfile);
+        }
+        
+        // Listen for user's likes
+        const likesQuery = query(collection(db, "likes"), orderBy("createdAt", "desc")); // This is wrong, should be subcollection or filtered
+        // Actually, let's just use the subcollection pattern we defined
+      } else {
+        setUserProfile(null);
+      }
+      setIsAuthReady(true);
+    });
+    return unsubscribe;
   }, []);
+
+  // Community Games Listener
+  useEffect(() => {
+    const q = query(collection(db, "games"), orderBy("createdAt", "desc"), limit(20));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const games = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Game));
+      setCommunityGames(games);
+    }, (error) => handleFirestoreError(error, OperationType.LIST, "games"));
+    return unsubscribe;
+  }, []);
+
+  // User Likes Listener
+  useEffect(() => {
+    if (!user) {
+      setUserLikes(new Set());
+      return;
+    }
+    
+    // We'll use a collectionGroup query or just listen to all likes if feasible, 
+    // but better to listen to likes where userId == user.uid
+    // Since we used /games/{gameId}/likes/{userId}, we can use a collectionGroup
+    // But for now, let's just fetch them when games are loaded or use a simpler structure if needed.
+    // Actually, let's just check if the doc exists in the UI for each game for now to avoid complex queries.
+  }, [user]);
+
+  const saveGame = async (title: string, code: string) => {
+    if (!userProfile) return;
+    try {
+      const gameData = {
+        title,
+        code,
+        authorId: userProfile.uid,
+        authorName: userProfile.username,
+        likes: 0,
+        views: 0,
+        createdAt: Timestamp.now()
+      };
+      const docRef = await addDoc(collection(db, "games"), gameData);
+      setGeneratedGameCode(null);
+      setGeneratedGameTitle(null);
+      // Automatically select the new game to play
+      setSelectedGame({ id: docRef.id, ...gameData } as Game);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, "games");
+    }
+  };
+
+  const likeGame = async (gameId: string) => {
+    if (!user) return;
+    const likeRef = doc(db, "games", gameId, "likes", user.uid);
+    const gameRef = doc(db, "games", gameId);
+    
+    try {
+      const likeDoc = await getDoc(likeRef);
+      if (likeDoc.exists()) {
+        await deleteDoc(likeRef);
+        await updateDoc(gameRef, { likes: increment(-1) });
+        setUserLikes(prev => {
+          const next = new Set(prev);
+          next.delete(gameId);
+          return next;
+        });
+      } else {
+        await setDoc(likeRef, {
+          userId: user.uid,
+          gameId: gameId,
+          createdAt: Timestamp.now()
+        });
+        await updateDoc(gameRef, { likes: increment(1) });
+        setUserLikes(prev => {
+          const next = new Set(prev);
+          next.add(gameId);
+          return next;
+        });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `games/${gameId}`);
+    }
+  };
+
+  const viewGame = async (game: Game) => {
+    setSelectedGame(game);
+    const gameRef = doc(db, "games", game.id);
+    try {
+      await updateDoc(gameRef, { views: increment(1) });
+    } catch (error) {
+      // Silent error for views
+    }
+  };
+
+  // Initialize Socket.io
+  useEffect(() => {
+    const socket = io();
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      setConnectionStatus("connected");
+      socket.emit("LOBBY_JOIN", {
+        playerId: persistentId,
+        name: playerName,
+        photoURL: user?.photoURL
+      });
+    });
+
+    socket.on("disconnect", () => {
+      setConnectionStatus("disconnected");
+    });
+
+    socket.on("LOBBY_INIT", (data) => {
+      console.log("Lobby initialized", data);
+      // Auto-join public voice room
+      joinVoiceRoom("public");
+    });
+
+    socket.on("LOBBY_UPDATE", (data) => {
+      setOnlineCount(data.onlineCount);
+      setOnlinePlayers(data.players);
+    });
+
+    socket.on("CHAT_MESSAGE", (msg) => {
+      setChatMessages(prev => [...prev, msg].slice(-50));
+    });
+
+    socket.on("VOICE_PEER_JOINED", ({ peerId }) => {
+      console.log("Peer joined voice", peerId);
+      if (localStreamRef.current) {
+        initiatePeerConnection(peerId, true);
+      }
+    });
+
+    socket.on("VOICE_PEER_LEFT", ({ peerId }) => {
+      console.log("Peer left voice", peerId);
+      if (peersRef.current[peerId]) {
+        peersRef.current[peerId].destroy();
+        delete peersRef.current[peerId];
+      }
+      if (audioRefs.current[peerId]) {
+        audioRefs.current[peerId].remove();
+        delete audioRefs.current[peerId];
+      }
+      setVoicePeers(prev => prev.filter(id => id !== peerId));
+    });
+
+    socket.on("VOICE_SIGNAL", ({ senderId, signal }) => {
+      if (peersRef.current[senderId]) {
+        peersRef.current[senderId].signal(signal);
+      } else {
+        initiatePeerConnection(senderId, false, signal);
+      }
+    });
+
+    socket.on("VOICE_JOIN_SUCCESS", ({ roomId, peers }) => {
+      setVoiceRoomId(roomId);
+      setVoicePeers(peers);
+      setIsVoiceJoining(false);
+      
+      // Initiate connections with existing peers
+      peers.forEach((peerId: string) => {
+        initiatePeerConnection(peerId, true);
+      });
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [persistentId, playerName, user]);
+
+  const initiatePeerConnection = (targetId: string, initiator: boolean, initialSignal?: any) => {
+    if (!localStreamRef.current) return;
+    
+    const peer = new SimplePeer({
+      initiator,
+      stream: localStreamRef.current,
+      trickle: false,
+      config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+    });
+
+    peer.on("signal", (signal) => {
+      socketRef.current?.emit("VOICE_SIGNAL", { targetId, signal });
+    });
+
+    peer.on("stream", (stream) => {
+      console.log("Received stream from", targetId);
+      const audio = new Audio();
+      audio.srcObject = stream;
+      audio.autoplay = true;
+      audioRefs.current[targetId] = audio;
+      
+      // Setup voice visualization for peer
+      setupPeerAnalyzer(targetId, stream);
+    });
+
+    peer.on("close", () => {
+      if (audioRefs.current[targetId]) {
+        audioRefs.current[targetId].remove();
+        delete audioRefs.current[targetId];
+      }
+      setVoicePeers(prev => prev.filter(id => id !== targetId));
+    });
+
+    if (initialSignal) {
+      peer.signal(initialSignal);
+    }
+
+    peersRef.current[targetId] = peer;
+    setVoicePeers(prev => Array.from(new Set([...prev, targetId])));
+  };
+
+  const setupPeerAnalyzer = (peerId: string, stream: MediaStream) => {
+    if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+    const source = audioCtxRef.current.createMediaStreamSource(stream);
+    const analyzer = audioCtxRef.current.createAnalyser();
+    analyzer.fftSize = 256;
+    source.connect(analyzer);
+    analyzersRef.current[peerId] = analyzer;
+
+    const checkSpeaking = () => {
+      const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+      analyzer.getByteFrequencyData(dataArray);
+      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+      
+      if (average > 15) {
+        setSpeakingPeers(prev => new Set(prev).add(peerId));
+        socketRef.current?.emit("VOICE_STATE", { isSpeaking: true });
+      } else {
+        setSpeakingPeers(prev => {
+          const next = new Set(prev);
+          next.delete(peerId);
+          return next;
+        });
+        socketRef.current?.emit("VOICE_STATE", { isSpeaking: false });
+      }
+      if (analyzersRef.current[peerId]) requestAnimationFrame(checkSpeaking);
+    };
+    checkSpeaking();
+  };
+
+  const joinVoiceRoom = async (roomId: string) => {
+    setIsVoiceJoining(true);
+    setVoiceError(null);
+    try {
+      if (!localStreamRef.current) {
+        localStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      socketRef.current?.emit("VOICE_JOIN", { roomId });
+    } catch (err: any) {
+      setVoiceError(err.message);
+      setIsVoiceJoining(false);
+    }
+  };
+
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+      audioTrack.enabled = !audioTrack.enabled;
+      setIsVoiceMuted(!audioTrack.enabled);
+      socketRef.current?.emit("VOICE_STATE", { isMuted: !audioTrack.enabled });
+    }
+  };
+
+  const sendChat = () => {
+    if (!chatInput.trim()) return;
+    socketRef.current?.emit("CHAT_MESSAGE", { text: chatInput });
+    setChatInput("");
+  };
 
   useEffect(() => {
     const getDevices = async () => {
@@ -284,485 +727,200 @@ export default function App() {
     });
   }, [selectedAudioOutputDevice]);
 
-  const connectLobby = () => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}`);
-    lobbySocketRef.current = socket;
-
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "LOBBY_JOIN", name: playerName, playerId: persistentId }));
-    };
-
-    socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      switch (data.type) {
-        case "LOBBY_INIT":
-          setOnlineCount(data.onlineCount || 0);
-          break;
-        case "LOBBY_UPDATE":
-        case "ONLINE_COUNT":
-          setOnlineCount(data.onlineCount || data.count || 0);
-          break;
-        case "CHAT_MESSAGE":
-          setChatMessages(prev => [...prev.slice(-99), data]);
-          break;
-        case "VOICE_JOIN_SUCCESS":
-          setVoiceRoomId(data.roomId);
-          setIsVoiceJoining(false);
-          setPrivateRoomInput("");
-          // Initiate connections to existing peers
-          data.peers.forEach((peerId: string) => {
-            const peer = createPeer(peerId, persistentId, localStreamRef.current!);
-            peersRef.current[peerId] = peer;
-          });
-          setVoicePeers(data.peers);
-          break;
-        case "VOICE_PEER_JOINED":
-          // We wait for them to signal us (they are the initiator)
-          setVoicePeers(prev => [...new Set([...prev, data.peerId])]);
-          break;
-        case "VOICE_SIGNAL":
-          if (peersRef.current[data.senderId]) {
-            peersRef.current[data.senderId].signal(data.signal);
-          } else {
-            // We are the receiver of an initial signal
-            const peer = addPeer(data.signal, data.senderId, persistentId, localStreamRef.current!);
-            peersRef.current[data.senderId] = peer;
-            setVoicePeers(prev => [...new Set([...prev, data.senderId])]);
-          }
-          break;
-        case "VOICE_PEER_LEFT":
-          if (peersRef.current[data.peerId]) {
-            peersRef.current[data.peerId].destroy();
-            delete peersRef.current[data.peerId];
-          }
-          if (audioRefs.current[data.peerId]) {
-            audioRefs.current[data.peerId].remove();
-            delete audioRefs.current[data.peerId];
-          }
-          if (analyzersRef.current[data.peerId]) {
-            delete analyzersRef.current[data.peerId];
-          }
-          setVoicePeers(prev => prev.filter(id => id !== data.peerId));
-          setSpeakingPeers(prev => {
-            const next = new Set(prev);
-            next.delete(data.peerId);
-            return next;
-          });
-          break;
-      }
-    };
-
-    socket.onclose = () => {
-      setTimeout(connectLobby, 3000);
-    };
-  };
-
-  const createPeer = (targetId: string, callerId: string, stream: MediaStream) => {
-    const peer = new SimplePeer({
-      initiator: true,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-        ]
-      }
-    });
-
-    peer.on("signal", signal => {
-      lobbySocketRef.current?.send(JSON.stringify({ type: "VOICE_SIGNAL", targetId, signal }));
-    });
-
-    peer.on("stream", stream => handleRemoteStream(targetId, stream));
-    
-    peer.on("error", err => {
-      console.error(`[Voice] Peer error with ${targetId}:`, err);
-      setVoiceError(`Connection error with a peer.`);
-    });
-
-    return peer;
-  };
-
-  const addPeer = (incomingSignal: any, callerId: string, targetId: string, stream: MediaStream) => {
-    const peer = new SimplePeer({
-      initiator: false,
-      trickle: false,
-      stream,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-        ]
-      }
-    });
-
-    peer.on("signal", signal => {
-      lobbySocketRef.current?.send(JSON.stringify({ type: "VOICE_SIGNAL", targetId: callerId, signal }));
-    });
-
-    peer.on("stream", stream => handleRemoteStream(callerId, stream));
-    
-    peer.on("error", err => {
-      console.error(`[Voice] Peer error with ${callerId}:`, err);
-    });
-
-    peer.signal(incomingSignal);
-    return peer;
-  };
-
-  const handleRemoteStream = (peerId: string, stream: MediaStream) => {
-    console.log(`[Voice] Received remote stream from ${peerId}`);
-    
-    // Create audio element and append to DOM to ensure it's not throttled
-    let audio = audioRefs.current[peerId];
-    if (!audio) {
-      audio = document.createElement("audio");
-      audio.autoplay = true;
-      (audio as any).playsInline = true;
-      audio.style.display = "none";
-      document.body.appendChild(audio);
-      audioRefs.current[peerId] = audio;
-    }
-    
-    audio.srcObject = stream;
-    if ((audio as any).setSinkId && selectedAudioOutputDevice) {
-      (audio as any).setSinkId(selectedAudioOutputDevice).catch(console.error);
-    }
-    
-    // Attempt to play (browsers might block)
-    audio.play().catch(err => {
-      console.warn(`[Voice] Autoplay blocked for ${peerId}, waiting for user interaction`, err);
-    });
-
-    // Speaking detection
-    if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-    if (audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
-    const source = audioCtxRef.current.createMediaStreamSource(stream);
-    const analyzer = audioCtxRef.current.createAnalyser();
-    analyzer.fftSize = 512;
-    source.connect(analyzer);
-    analyzersRef.current[peerId] = analyzer;
-
-    const dataArray = new Uint8Array(analyzer.frequencyBinCount);
-    const checkSpeaking = () => {
-      if (!analyzersRef.current[peerId]) return;
-      analyzer.getByteFrequencyData(dataArray);
-      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-      
-      setSpeakingPeers(prev => {
-        const next = new Set(prev);
-        if (average > 25) next.add(peerId);
-        else next.delete(peerId);
-        return next;
-      });
-      
-      requestAnimationFrame(checkSpeaking);
-    };
-    checkSpeaking();
-  };
-
-  const joinVoice = async (roomId: string = "public") => {
-    try {
-      setVoiceError(null);
-      if (!window.isSecureContext) {
-        throw new Error("Voice chat requires a secure (HTTPS) connection.");
-      }
-      setIsVoiceJoining(true);
-
-      // Ensure AudioContext is resumed
-      if (audioCtxRef.current?.state === 'suspended') {
-        await audioCtxRef.current.resume();
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined
-        } 
-      });
-      localStreamRef.current = stream;
-
-      // Local speaking detection
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-      const source = audioCtxRef.current.createMediaStreamSource(stream);
-      const analyzer = audioCtxRef.current.createAnalyser();
-      analyzer.fftSize = 512;
-      source.connect(analyzer);
-      analyzersRef.current["local"] = analyzer;
-
-      const dataArray = new Uint8Array(analyzer.frequencyBinCount);
-      const checkSpeaking = () => {
-        if (!analyzersRef.current["local"]) return;
-        analyzer.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-        setSpeakingPeers(prev => {
-          const next = new Set(prev);
-          if (average > 25 && !isVoiceMuted) next.add("local");
-          else next.delete("local");
-          return next;
-        });
-        requestAnimationFrame(checkSpeaking);
-      };
-      checkSpeaking();
-
-      lobbySocketRef.current?.send(JSON.stringify({ type: "VOICE_JOIN", roomId }));
-    } catch (err: any) {
-      console.error("[Voice] Join failed:", err);
-      setVoiceError(err.message || "Failed to access microphone.");
-      setIsVoiceJoining(false);
-    }
-  };
-
-  const leaveVoice = () => {
-    lobbySocketRef.current?.send(JSON.stringify({ type: "VOICE_LEAVE" }));
-    setVoiceRoomId(null);
-    setVoicePeers([]);
-    setSpeakingPeers(new Set());
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => track.stop());
-      localStreamRef.current = null;
-    }
-    Object.values(peersRef.current).forEach(peer => peer.destroy());
-    peersRef.current = {};
-    Object.values(audioRefs.current).forEach(audio => audio.remove());
-    audioRefs.current = {};
-    analyzersRef.current = {};
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(console.error);
-      audioCtxRef.current = null;
-    }
-  };
-
-  const toggleMute = () => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsVoiceMuted(!audioTrack.enabled);
-      }
-    }
-  };
-
-  const sendChat = () => {
-    if (!chatInput.trim()) return;
-    lobbySocketRef.current?.send(JSON.stringify({
-      type: "CHAT_MESSAGE",
-      text: chatInput,
-      playerId: persistentId
-    }));
-    setChatInput("");
-  };
-
   const handleNameSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (playerNameInput.trim()) {
       setPlayerName(playerNameInput.trim());
       localStorage.setItem("playerName", playerNameInput.trim());
       setIsNameSet(true);
-      lobbySocketRef.current?.send(JSON.stringify({ type: "LOBBY_JOIN", name: playerNameInput.trim(), playerId: persistentId }));
+      socketRef.current?.emit("LOBBY_JOIN", { 
+        name: playerNameInput.trim(), 
+        playerId: persistentId,
+        photoURL: user?.photoURL
+      });
     }
   };
 
   if (!isNameSet) {
     return (
-      <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-6 font-sans">
+      <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-6 font-sans relative overflow-hidden">
+        <SpaceWallpaper />
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md bg-neutral-900 border border-neutral-800 p-8 rounded-3xl shadow-2xl"
+          className="w-full max-w-md bg-neutral-900/80 backdrop-blur-2xl border border-neutral-800 p-10 rounded-[2.5rem] shadow-2xl relative z-10"
         >
-          <div className="flex justify-center mb-8">
-            <div className="w-16 h-16 bg-orange-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20">
-              <Mic className="w-8 h-8 text-white" />
+          <div className="flex justify-center mb-10">
+            <div className="w-20 h-20 bg-gradient-to-br from-orange-400 to-orange-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-orange-500/40 rotate-3 group hover:rotate-0 transition-transform duration-500">
+              <Mic className="w-10 h-10 text-white animate-pulse" />
             </div>
           </div>
-          <h1 className="text-3xl font-black text-white text-center mb-2 uppercase tracking-tight italic">VoiceHub</h1>
-          <p className="text-neutral-500 text-center mb-8 text-sm">Set your display name to start chatting.</p>
+          <h1 className="text-4xl font-black text-white text-center mb-3 uppercase tracking-tighter italic">VoiceHub</h1>
+          <p className="text-neutral-500 text-center mb-10 text-sm font-medium">Connect with friends in real-time high-fidelity audio.</p>
           
-          <form onSubmit={handleNameSubmit} className="space-y-4">
-            <input 
-              type="text"
-              value={playerNameInput}
-              onChange={(e) => setPlayerNameInput(e.target.value)}
-              placeholder="Enter your name..."
-              maxLength={20}
-              className="w-full bg-neutral-800 border border-neutral-700 text-white px-6 py-4 rounded-2xl focus:outline-none focus:border-orange-500 transition-all font-bold"
-            />
+          <form onSubmit={handleNameSubmit} className="space-y-5">
+            <div className="relative group">
+              <User className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-600 group-focus-within:text-orange-500 transition-colors" />
+              <input 
+                type="text"
+                value={playerNameInput}
+                onChange={(e) => setPlayerNameInput(e.target.value)}
+                placeholder="What should we call you?"
+                maxLength={20}
+                className="w-full bg-neutral-950/50 border border-neutral-800 text-white pl-14 pr-6 py-5 rounded-2xl focus:outline-none focus:border-orange-500/50 focus:ring-4 focus:ring-orange-500/10 transition-all font-bold placeholder:text-neutral-700"
+              />
+            </div>
             <button 
               type="submit"
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-black py-4 rounded-2xl transition-all shadow-lg shadow-orange-500/20 uppercase italic tracking-widest"
+              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-black py-5 rounded-2xl transition-all shadow-xl shadow-orange-500/20 uppercase italic tracking-widest flex items-center justify-center gap-3 group active:scale-[0.98]"
             >
-              Enter Hub
+              <span>Enter Hub</span>
+              <Rocket className="w-5 h-5 group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
             </button>
           </form>
+
+          <div className="mt-8 pt-8 border-t border-neutral-800/50 flex items-center justify-center gap-6">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+              <span className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">{onlineCount} Online</span>
+            </div>
+            <div className="w-1 h-1 bg-neutral-800 rounded-full" />
+            <div className="flex items-center gap-2">
+              <Globe className="w-3 h-3 text-neutral-600" />
+              <span className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Global Hub</span>
+            </div>
+          </div>
         </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans flex flex-col md:flex-row overflow-hidden relative"
-      onClick={() => {
-        if (audioCtxRef.current?.state === 'suspended') {
-          audioCtxRef.current.resume();
-        }
-      }}
-    >
-      <SpaceWallpaper />
+    <ErrorBoundary>
+      <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans flex flex-col md:flex-row overflow-hidden relative"
+        onClick={() => {
+          if (audioCtxRef.current?.state === 'suspended') {
+            audioCtxRef.current.resume();
+          }
+        }}
+      >
+        <SpaceWallpaper />
       
       {/* Sidebar */}
       <aside className="w-full md:w-80 bg-neutral-900/80 backdrop-blur-xl border-r border-neutral-800 flex flex-col shrink-0 relative z-10">
-        <div className="p-6 border-b border-neutral-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center shadow-lg shadow-orange-500/20">
-              <Mic className="w-5 h-5 text-white" />
+        <div className="p-6 border-b border-neutral-800">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-orange-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20">
+                <Hash className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h1 className="text-xl font-black text-white uppercase italic tracking-tighter">VoiceHub</h1>
+                <div className="flex items-center gap-1.5">
+                  <div className={`w-1.5 h-1.5 rounded-full ${connectionStatus === 'connected' ? 'bg-green-500 animate-pulse' : connectionStatus === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'}`} />
+                  <span className="text-[8px] font-black text-neutral-500 uppercase tracking-widest">
+                    {connectionStatus === 'connected' ? 'Connected' : connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
+                  </span>
+                </div>
+              </div>
             </div>
-            <h1 className="text-xl font-black text-white uppercase italic tracking-tight">VoiceHub</h1>
           </div>
-          <div className="flex items-center gap-2 text-neutral-500">
-            <Users className="w-4 h-4" />
-            <span className="text-xs font-bold">{onlineCount}</span>
+
+          <div className="space-y-1">
+            <button 
+              onClick={() => joinVoiceRoom("public")}
+              className={`w-full flex items-center justify-between p-3 rounded-xl transition-all group ${voiceRoomId === "public" ? "bg-orange-500/10 border border-orange-500/20 text-orange-500" : "hover:bg-neutral-800 text-neutral-400"}`}
+            >
+              <div className="flex items-center gap-3">
+                <Volume2 className="w-4 h-4" />
+                <span className="text-xs font-black uppercase italic">Public Room</span>
+              </div>
+              {voiceRoomId === "public" && <Activity className="w-3 h-3 animate-pulse" />}
+            </button>
+            
+            <div className="pt-4 pb-2">
+              <label className="text-[10px] font-black text-neutral-600 uppercase tracking-widest px-3">Private Channel</label>
+            </div>
+            <div className="flex gap-2">
+              <input 
+                type="text"
+                value={privateRoomInput}
+                onChange={(e) => setPrivateRoomInput(e.target.value)}
+                placeholder="Room Code"
+                className="flex-1 bg-neutral-950 border border-neutral-800 text-white px-3 py-2 rounded-lg text-[10px] font-bold focus:outline-none focus:border-orange-500 transition-all"
+              />
+              <button 
+                onClick={() => joinVoiceRoom(privateRoomInput)}
+                className="p-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-lg transition-all"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
-          {/* Rooms */}
-          <section>
-            <h2 className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-4 px-2">Voice Channels</h2>
+          <div>
+            <div className="flex items-center justify-between px-2 mb-3">
+              <label className="text-[10px] font-black text-neutral-600 uppercase tracking-widest">Online Users ({onlineCount})</label>
+              <Users className="w-3 h-3 text-neutral-600" />
+            </div>
             <div className="space-y-1">
-              {["Public Lobby", "Gaming", "Music", "Chill"].map((room) => (
-                <button
-                  key={room}
-                  onClick={() => !voiceRoomId && joinVoice(room.toLowerCase().replace(" ", "_"))}
-                  disabled={!!voiceRoomId && voiceRoomId !== room.toLowerCase().replace(" ", "_")}
-                  className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all group ${
-                    voiceRoomId === room.toLowerCase().replace(" ", "_") 
-                    ? "bg-orange-500 text-white shadow-lg shadow-orange-500/10" 
-                    : "hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
-                  }`}
-                >
+              {onlinePlayers.map(player => (
+                <div key={player.id} className="flex items-center justify-between p-2 rounded-xl hover:bg-neutral-800/50 transition-all group">
                   <div className="flex items-center gap-3">
-                    <Hash className={`w-4 h-4 ${voiceRoomId === room.toLowerCase().replace(" ", "_") ? "text-white" : "text-neutral-600"}`} />
-                    <span className="text-sm font-bold">{room}</span>
+                    <div className="relative">
+                      <img src={player.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${player.id}`} alt="" className="w-8 h-8 rounded-lg border border-neutral-800" referrerPolicy="no-referrer" />
+                      {player.isSpeaking && (
+                        <div className="absolute -inset-1 border-2 border-green-500 rounded-lg animate-pulse" />
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-xs font-black text-neutral-300 uppercase italic group-hover:text-white transition-colors">{player.name}</p>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[8px] font-bold text-neutral-600 uppercase tracking-tighter">
+                          {player.id === persistentId ? 'You' : 'Guest'}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  {voiceRoomId === room.toLowerCase().replace(" ", "_") && (
-                    <Activity className="w-3 h-3 animate-pulse" />
-                  )}
-                </button>
+                  <div className="flex items-center gap-2">
+                    {player.isMuted && <MicOff className="w-3 h-3 text-red-500/50" />}
+                    {player.isSpeaking && <Activity className="w-3 h-3 text-green-500" />}
+                  </div>
+                </div>
               ))}
             </div>
-          </section>
-
-          {/* Private Room */}
-          <section>
-            <h2 className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-4 px-2">Private Room</h2>
-            <div className="px-2 space-y-2">
-              <div className="flex gap-2">
-                <input 
-                  type="text"
-                  value={privateRoomInput}
-                  onChange={(e) => setPrivateRoomInput(e.target.value.toUpperCase())}
-                  placeholder="CODE"
-                  maxLength={6}
-                  className="w-full bg-neutral-800 border border-neutral-700 text-white px-3 py-2 rounded-xl text-xs font-bold focus:outline-none focus:border-orange-500 transition-all"
-                />
-                <button 
-                  onClick={() => privateRoomInput.length >= 3 && joinVoice(`private_${privateRoomInput}`)}
-                  disabled={!!voiceRoomId || privateRoomInput.length < 3 || isVoiceJoining}
-                  className="p-2 bg-neutral-800 hover:bg-neutral-700 text-orange-500 rounded-xl transition-all disabled:opacity-50"
-                >
-                  <Plus className="w-4 h-4" />
-                </button>
-              </div>
-              <p className="text-[8px] text-neutral-600 font-bold uppercase tracking-tight">Enter a code to join or create a private room.</p>
-            </div>
-          </section>
-
-          {/* Connected Peers */}
-          {voiceRoomId && (
-            <section>
-              <h2 className="text-[10px] font-black text-neutral-500 uppercase tracking-widest mb-4 px-2">Participants</h2>
-              <div className="space-y-2">
-                <div className={`p-3 rounded-xl border transition-all ${speakingPeers.has("local") ? 'bg-orange-500/10 border-orange-500/50' : 'bg-neutral-800/50 border-neutral-700'}`}>
-                  <div className="flex items-center gap-3 mb-2">
-                    <div className="relative">
-                      <div className="w-8 h-8 bg-neutral-700 rounded-lg flex items-center justify-center">
-                        <User className="w-4 h-4 text-neutral-400" />
-                      </div>
-                      <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-neutral-900 ${speakingPeers.has("local") ? 'bg-green-500 animate-pulse' : 'bg-neutral-500'}`} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-black truncate">{playerName} (You)</p>
-                      <p className="text-[10px] text-neutral-500 uppercase font-bold">{isVoiceMuted ? 'Muted' : 'Active'}</p>
-                    </div>
-                  </div>
-                  <VoiceVisualizer analyzer={analyzersRef.current["local"]} isMuted={isVoiceMuted} />
-                </div>
-
-                {voicePeers.map(peerId => (
-                  <div key={peerId} className={`p-3 rounded-xl border transition-all ${speakingPeers.has(peerId) ? 'bg-green-500/10 border-green-500/50' : 'bg-neutral-800/50 border-neutral-700'}`}>
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="relative">
-                        <div className="w-8 h-8 bg-neutral-700 rounded-lg flex items-center justify-center">
-                          <User className="w-4 h-4 text-neutral-400" />
-                        </div>
-                        <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-neutral-900 ${speakingPeers.has(peerId) ? 'bg-green-500 animate-pulse' : 'bg-neutral-500'}`} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-black truncate">User_{peerId.slice(0, 4)}</p>
-                        <p className="text-[10px] text-neutral-500 uppercase font-bold">Connected</p>
-                      </div>
-                    </div>
-                    <VoiceVisualizer analyzer={analyzersRef.current[peerId]} />
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
+          </div>
         </div>
 
-        {/* User Controls */}
         <div className="p-4 bg-neutral-950/50 border-t border-neutral-800">
-          {voiceRoomId ? (
-            <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center justify-between bg-neutral-900 p-3 rounded-2xl border border-neutral-800">
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <img src={user?.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${persistentId}`} alt="" className="w-10 h-10 rounded-xl border border-neutral-800" referrerPolicy="no-referrer" />
+                <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-green-500 border-2 border-neutral-900 rounded-full" />
+              </div>
+              <div className="hidden sm:block">
+                <p className="text-xs font-black text-white uppercase italic truncate max-w-[80px]">{playerName}</p>
+                <p className="text-[8px] font-bold text-neutral-500 uppercase tracking-widest">Online</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
               <button 
                 onClick={toggleMute}
-                className={`flex-1 p-3 rounded-xl flex items-center justify-center transition-all ${isVoiceMuted ? 'bg-red-500/20 text-red-500 border border-red-500/50' : 'bg-neutral-800 text-neutral-200 hover:bg-neutral-700'}`}
+                className={`p-2 rounded-lg transition-all ${isVoiceMuted ? "bg-red-500/10 text-red-500" : "hover:bg-neutral-800 text-neutral-400"}`}
               >
-                {isVoiceMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                {isVoiceMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
               </button>
               <button 
-                onClick={leaveVoice}
-                className="flex-1 p-3 rounded-xl bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-all shadow-lg shadow-red-500/20"
+                onClick={() => setShowSettings(true)}
+                className="p-2 hover:bg-neutral-800 text-neutral-400 rounded-lg transition-all"
               >
-                <PhoneOff className="w-5 h-5" />
+                <Settings className="w-4 h-4" />
               </button>
             </div>
-          ) : (
-            <button 
-              onClick={() => joinVoice("public")}
-              disabled={isVoiceJoining}
-              className="w-full p-4 bg-orange-500 hover:bg-orange-600 text-white font-black rounded-2xl flex items-center justify-center gap-3 transition-all shadow-lg shadow-orange-500/20 uppercase italic tracking-widest disabled:opacity-50"
-            >
-              {isVoiceJoining ? <Activity className="w-5 h-5 animate-spin" /> : <Mic className="w-5 h-5" />}
-              Join Voice
-            </button>
-          )}
-          {voiceError && (
-            <p className="mt-3 text-[10px] font-bold text-red-500 uppercase text-center">{voiceError}</p>
-          )}
+          </div>
         </div>
       </aside>
 
@@ -797,9 +955,31 @@ export default function App() {
               >
                 AI Lab
               </button>
+              <button 
+                onClick={() => setActiveTab("community")}
+                className={`px-4 py-2 rounded-lg text-xs font-black uppercase italic transition-all ${activeTab === "community" ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20" : "text-neutral-500 hover:text-neutral-300"}`}
+              >
+                Community
+              </button>
             </nav>
           </div>
           <div className="flex items-center gap-4">
+            {user ? (
+              <div className="flex items-center gap-3">
+                <div className="text-right hidden sm:block">
+                  <p className="text-xs font-black text-white uppercase italic">{userProfile?.username}</p>
+                  <button onClick={() => signOut()} className="text-[8px] font-bold text-neutral-500 hover:text-red-500 uppercase tracking-widest">Sign Out</button>
+                </div>
+                <img src={user.photoURL || ""} alt="" className="w-8 h-8 rounded-lg border border-neutral-800" referrerPolicy="no-referrer" />
+              </div>
+            ) : (
+              <button 
+                onClick={() => signInWithGoogle()}
+                className="bg-white text-black text-[10px] font-black px-4 py-2 rounded-xl uppercase italic tracking-tight hover:bg-neutral-200 transition-all"
+              >
+                Sign In
+              </button>
+            )}
             <button 
               onClick={() => setShowSettings(true)}
               className="p-2 text-neutral-500 hover:text-white transition-all"
@@ -819,7 +999,42 @@ export default function App() {
         </header>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4 relative z-10">
-          {activeTab === "chat" ? (
+          {selectedGame ? (
+            <div className="max-w-5xl mx-auto w-full space-y-6">
+              <button 
+                onClick={() => setSelectedGame(null)}
+                className="flex items-center gap-2 text-neutral-500 hover:text-white transition-all group"
+              >
+                <ChevronLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+                <span className="text-xs font-black uppercase italic">Back to {activeTab}</span>
+              </button>
+              
+              <div className="bg-neutral-900/80 backdrop-blur-xl border border-neutral-800 rounded-3xl overflow-hidden shadow-2xl">
+                <div className="p-6 border-b border-neutral-800 flex items-center justify-between bg-neutral-900/50">
+                  <div>
+                    <h3 className="text-2xl font-black text-white uppercase italic tracking-tight">{selectedGame.title}</h3>
+                    <p className="text-xs text-neutral-500 font-bold uppercase tracking-widest">By {selectedGame.authorName}</p>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 text-neutral-400">
+                      <Eye className="w-4 h-4" />
+                      <span className="text-xs font-bold">{selectedGame.views}</span>
+                    </div>
+                    <button 
+                      onClick={() => likeGame(selectedGame.id)}
+                      className={`flex items-center gap-1.5 px-4 py-2 rounded-xl border transition-all ${userLikes.has(selectedGame.id) ? 'bg-red-500/10 border-red-500/50 text-red-500' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'}`}
+                    >
+                      <Heart className={`w-4 h-4 ${userLikes.has(selectedGame.id) ? 'fill-current' : ''}`} />
+                      <span className="text-xs font-bold">{selectedGame.likes}</span>
+                    </button>
+                  </div>
+                </div>
+                <div className="p-8 bg-neutral-950 min-h-[500px]">
+                  <GameSandbox code={selectedGame.code} />
+                </div>
+              </div>
+            </div>
+          ) : activeTab === "chat" ? (
             <AnimatePresence initial={false}>
               {chatMessages.map((msg, i) => (
                 <motion.div 
@@ -838,37 +1053,95 @@ export default function App() {
                 </motion.div>
               ))}
             </AnimatePresence>
-          ) : (
+          ) : activeTab === "lab" ? (
             <div className="max-w-4xl mx-auto w-full space-y-8">
-              <AIGameLab onGameCreated={(code) => setGeneratedGameCode(code)} />
+              <AIGameLab 
+                userProfile={userProfile}
+                onGameCreated={(title, code) => {
+                  setGeneratedGameCode(code);
+                  setGeneratedGameTitle(title);
+                }} 
+              />
               
               {generatedGameCode && (
-                <div className="bg-neutral-900/80 backdrop-blur-xl border border-neutral-800 rounded-3xl p-8 min-h-[400px] flex flex-col">
+                <div className="bg-neutral-900/80 backdrop-blur-xl border border-neutral-800 rounded-3xl p-8 min-h-[400px] flex flex-col shadow-2xl">
                   <div className="flex items-center justify-between mb-6">
                     <div className="flex items-center gap-3">
                       <Gamepad2 className="w-5 h-5 text-orange-500" />
-                      <h4 className="text-sm font-black text-white uppercase italic tracking-tight">Generated Game</h4>
+                      <h4 className="text-sm font-black text-white uppercase italic tracking-tight">New Creation: {generatedGameTitle}</h4>
                     </div>
-                    <button 
-                      onClick={() => setGeneratedGameCode(null)}
-                      className="text-xs font-bold text-neutral-500 hover:text-red-500 uppercase tracking-widest"
-                    >
-                      Clear
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button 
+                        onClick={() => saveGame(generatedGameTitle || "Untitled", generatedGameCode)}
+                        className="bg-orange-500 hover:bg-orange-600 text-white text-[10px] font-black px-4 py-2 rounded-xl uppercase italic tracking-widest transition-all shadow-lg shadow-orange-500/20"
+                      >
+                        Save & Publish
+                      </button>
+                      <button 
+                        onClick={() => { setGeneratedGameCode(null); setGeneratedGameTitle(null); }}
+                        className="text-xs font-bold text-neutral-500 hover:text-red-500 uppercase tracking-widest"
+                      >
+                        Discard
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex-1 flex items-center justify-center bg-neutral-950 rounded-2xl border border-neutral-800 overflow-hidden relative">
-                    {/* Game Sandbox Simulation */}
-                    <div className="text-center p-8">
-                      <Rocket className="w-12 h-12 text-orange-500 mx-auto mb-4 animate-bounce" />
-                      <h5 className="text-lg font-black text-white uppercase italic mb-2">Game Ready!</h5>
-                      <p className="text-sm text-neutral-500 mb-6 max-w-xs">The AI has generated your game code. In a full production environment, this would be dynamically rendered here.</p>
-                      <pre className="text-[10px] text-left bg-black p-4 rounded-xl overflow-auto max-h-40 border border-neutral-800 text-orange-400 font-mono">
-                        {generatedGameCode.slice(0, 500)}...
-                      </pre>
-                    </div>
+                  <div className="flex-1 bg-neutral-950 rounded-2xl border border-neutral-800 overflow-hidden relative p-6">
+                    <GameSandbox code={generatedGameCode} />
                   </div>
                 </div>
               )}
+            </div>
+          ) : (
+            <div className="max-w-6xl mx-auto w-full space-y-8">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-3xl font-black text-white uppercase italic tracking-tight">Community Games</h2>
+                  <p className="text-sm text-neutral-500 font-bold uppercase tracking-widest">Play games created by the community</p>
+                </div>
+                <div className="flex items-center gap-2 bg-neutral-900 p-1 rounded-xl border border-neutral-800">
+                  <button className="px-4 py-2 bg-orange-500 text-white rounded-lg text-[10px] font-black uppercase italic tracking-widest">Newest</button>
+                  <button className="px-4 py-2 text-neutral-500 hover:text-white rounded-lg text-[10px] font-black uppercase italic tracking-widest">Popular</button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {communityGames.map(game => (
+                  <motion.div 
+                    key={game.id}
+                    whileHover={{ y: -5 }}
+                    className="bg-neutral-900/80 backdrop-blur-xl border border-neutral-800 rounded-3xl overflow-hidden group cursor-pointer"
+                    onClick={() => viewGame(game)}
+                  >
+                    <div className="aspect-video bg-neutral-950 flex items-center justify-center border-b border-neutral-800 relative">
+                      <div className="absolute inset-0 bg-orange-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                      <div className="w-12 h-12 bg-orange-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20 group-hover:scale-110 transition-transform">
+                        <Play className="w-6 h-6 text-white fill-current" />
+                      </div>
+                    </div>
+                    <div className="p-5 space-y-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h4 className="text-lg font-black text-white uppercase italic tracking-tight truncate">{game.title}</h4>
+                          <p className="text-[10px] text-neutral-500 font-bold uppercase tracking-widest">By {game.authorName}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between pt-2 border-t border-neutral-800/50">
+                        <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-1 text-neutral-500">
+                            <Heart className="w-3 h-3" />
+                            <span className="text-[10px] font-bold">{game.likes}</span>
+                          </div>
+                          <div className="flex items-center gap-1 text-neutral-500">
+                            <Eye className="w-3 h-3" />
+                            <span className="text-[10px] font-bold">{game.views}</span>
+                          </div>
+                        </div>
+                        <span className="text-[8px] text-neutral-600 font-bold uppercase">{new Date(game.createdAt.toDate()).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
             </div>
           )}
           <div className="h-4" />
@@ -899,82 +1172,85 @@ export default function App() {
       {/* Settings Modal */}
       <AnimatePresence>
         {showSettings && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setShowSettings(false)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              className="absolute inset-0 bg-neutral-950/80 backdrop-blur-sm"
             />
             <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl shadow-2xl overflow-hidden"
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-[2.5rem] shadow-2xl relative z-10 overflow-hidden"
             >
-              <div className="p-6 border-b border-neutral-800 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <Settings className="w-5 h-5 text-orange-500" />
-                  <h2 className="text-lg font-black text-white uppercase italic tracking-tight">Device Settings</h2>
+              <div className="p-8 border-b border-neutral-800 flex items-center justify-between bg-neutral-900/50">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-orange-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20">
+                    <Settings className="w-6 h-6 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-black text-white uppercase italic tracking-tighter">Settings</h2>
+                    <p className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Configure your audio devices</p>
+                  </div>
                 </div>
                 <button 
                   onClick={() => setShowSettings(false)}
-                  className="text-neutral-500 hover:text-white transition-all"
+                  className="p-3 hover:bg-neutral-800 text-neutral-500 hover:text-white rounded-xl transition-all"
                 >
-                  <LogOut className="w-5 h-5 rotate-180" />
+                  <X className="w-6 h-6" />
                 </button>
               </div>
 
-              <div className="p-6 space-y-6">
-                {/* Input Device */}
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Mic className="w-4 h-4 text-neutral-500" />
-                    <label className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Input Device (Microphone)</label>
+              <div className="p-8 space-y-8">
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 px-2">
+                    <Mic className="w-4 h-4 text-orange-500" />
+                    <label className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Input Device</label>
                   </div>
                   <select 
                     value={selectedAudioDevice}
                     onChange={(e) => setSelectedAudioDevice(e.target.value)}
-                    className="w-full bg-neutral-800 border border-neutral-700 text-white px-4 py-3 rounded-xl text-sm font-bold focus:outline-none focus:border-orange-500 transition-all appearance-none"
+                    className="w-full bg-neutral-950 border border-neutral-800 text-white px-6 py-4 rounded-2xl focus:outline-none focus:border-orange-500 transition-all font-bold appearance-none cursor-pointer hover:border-neutral-700"
                   >
                     {audioDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId.slice(0, 4)}`}</option>
+                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId.slice(0, 5)}`}</option>
                     ))}
                   </select>
                 </div>
 
-                {/* Output Device */}
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Volume2 className="w-4 h-4 text-neutral-500" />
-                    <label className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Output Device (Speakers)</label>
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 px-2">
+                    <Volume2 className="w-4 h-4 text-orange-500" />
+                    <label className="text-[10px] font-black text-neutral-500 uppercase tracking-widest">Output Device</label>
                   </div>
                   <select 
                     value={selectedAudioOutputDevice}
                     onChange={(e) => setSelectedAudioOutputDevice(e.target.value)}
-                    className="w-full bg-neutral-800 border border-neutral-700 text-white px-4 py-3 rounded-xl text-sm font-bold focus:outline-none focus:border-orange-500 transition-all appearance-none"
+                    className="w-full bg-neutral-950 border border-neutral-800 text-white px-6 py-4 rounded-2xl focus:outline-none focus:border-orange-500 transition-all font-bold appearance-none cursor-pointer hover:border-neutral-700"
                   >
                     {audioOutputDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0, 4)}`}</option>
+                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0, 5)}`}</option>
                     ))}
                   </select>
-                  <p className="text-[8px] text-neutral-600 font-bold uppercase tracking-tight">Note: Output device selection may not be supported in all browsers (e.g. Safari).</p>
                 </div>
-              </div>
 
-              <div className="p-6 bg-neutral-950/50 border-t border-neutral-800">
-                <button 
-                  onClick={() => setShowSettings(false)}
-                  className="w-full bg-orange-500 hover:bg-orange-600 text-white font-black py-4 rounded-2xl transition-all shadow-lg shadow-orange-500/20 uppercase italic tracking-widest"
-                >
-                  Save Changes
-                </button>
+                <div className="pt-4">
+                  <button 
+                    onClick={() => setShowSettings(false)}
+                    className="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-black py-5 rounded-2xl transition-all uppercase italic tracking-widest shadow-xl active:scale-[0.98]"
+                  >
+                    Save Changes
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }

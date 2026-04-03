@@ -1,28 +1,58 @@
 {
   "entities": {
-    "UserProfile": {
-      "title": "User Profile",
-      "description": "Stores user game progress and stats",
+    "User": {
+      "title": "User",
+      "description": "User profile information",
       "type": "object",
       "properties": {
-        "uid": { "type": "string", "description": "User ID" },
-        "name": { "type": "string", "description": "Player name" },
-        "money": { "type": "number", "description": "Current money" },
-        "trophies": { "type": "number", "description": "Total trophies" },
-        "kills": { "type": "number", "description": "Total kills" },
-        "deaths": { "type": "number", "description": "Total deaths" },
-        "unlockedSkins": { "type": "array", "items": { "type": "string" }, "description": "List of unlocked skins" },
-        "currentSkin": { "type": "string", "description": "Currently equipped skin" },
-        "friends": { "type": "array", "items": { "type": "string" }, "description": "List of friend UIDs" },
-        "friendRequests": { "type": "array", "items": { "type": "string" }, "description": "List of incoming friend request UIDs" }
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "username": { "type": "string", "description": "Unique username" },
+        "displayName": { "type": "string", "description": "User's display name" },
+        "photoURL": { "type": "string", "description": "User's profile picture URL" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Account creation timestamp" }
       },
-      "required": ["uid", "name", "money", "trophies", "kills", "deaths"]
+      "required": ["uid", "username", "createdAt"]
+    },
+    "Game": {
+      "title": "Game",
+      "description": "A game created by the AI",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique game ID" },
+        "title": { "type": "string", "description": "Title of the game" },
+        "code": { "type": "string", "description": "The generated code for the game" },
+        "authorId": { "type": "string", "description": "UID of the creator" },
+        "authorName": { "type": "string", "description": "Username of the creator" },
+        "likes": { "type": "number", "description": "Number of likes" },
+        "views": { "type": "number", "description": "Number of views" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Game creation timestamp" }
+      },
+      "required": ["title", "code", "authorId", "authorName", "likes", "views", "createdAt"]
+    },
+    "Like": {
+      "title": "Like",
+      "description": "A like on a game",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "UID of the user who liked" },
+        "gameId": { "type": "string", "description": "ID of the game liked" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Like timestamp" }
+      },
+      "required": ["userId", "gameId", "createdAt"]
     }
   },
   "firestore": {
-    "/users/{uid}": {
-      "schema": "UserProfile",
-      "description": "User profile data"
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/games/{gameId}": {
+      "schema": "Game",
+      "description": "Stored games"
+    },
+    "/games/{gameId}/likes/{userId}": {
+      "schema": "Like",
+      "description": "Likes on a specific game"
     }
   }
 }
