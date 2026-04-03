@@ -2,17 +2,156 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { 
   Mic, MicOff, PhoneOff, Users, Settings, 
   MessageSquare, Send, Volume2, VolumeX, 
-  Hash, Plus, LogOut, User, Activity
+  Hash, Plus, LogOut, User, Activity,
+  Rocket, Sparkles, Gamepad2, Cpu
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { Canvas, useFrame } from "@react-three/fiber";
+import { Sphere, MeshDistortMaterial, Stars, Float, OrbitControls } from "@react-three/drei";
+import * as THREE from "three";
 import SimplePeer from "simple-peer";
 import { nanoid } from "nanoid";
 import { Buffer } from "buffer";
+import { GoogleGenAI, Type } from "@google/genai";
 
 // Polyfill for simple-peer
 if (typeof window !== "undefined") {
   window.Buffer = Buffer;
 }
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
+const FallingStars = () => {
+  const count = 100;
+  const mesh = useRef<THREE.Points>(null);
+  const [positions] = useState(() => {
+    const pos = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      pos[i * 3] = (Math.random() - 0.5) * 20;
+      pos[i * 3 + 1] = (Math.random() - 0.5) * 20;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 10;
+    }
+    return pos;
+  });
+
+  useFrame((state, delta) => {
+    if (!mesh.current) return;
+    const pos = mesh.current.geometry.attributes.position.array as Float32Array;
+    for (let i = 0; i < count; i++) {
+      pos[i * 3 + 1] -= delta * 2; // Fall down
+      if (pos[i * 3 + 1] < -10) {
+        pos[i * 3 + 1] = 10;
+        pos[i * 3] = (Math.random() - 0.5) * 20;
+      }
+    }
+    mesh.current.geometry.attributes.position.needsUpdate = true;
+  });
+
+  return (
+    <points ref={mesh}>
+      <bufferGeometry>
+        <bufferAttribute
+          attach="attributes-position"
+          count={count}
+          array={positions}
+          itemSize={3}
+        />
+      </bufferGeometry>
+      <pointsMaterial size={0.05} color="#fb923c" transparent opacity={0.8} />
+    </points>
+  );
+};
+
+const Saturn = () => {
+  const group = useRef<THREE.Group>(null);
+  useFrame((state) => {
+    if (group.current) {
+      group.current.rotation.y += 0.005;
+      group.current.rotation.z += 0.002;
+    }
+  });
+
+  return (
+    <group ref={group} position={[5, 2, -5]}>
+      {/* Planet */}
+      <Sphere args={[1.5, 64, 64]}>
+        <meshStandardMaterial color="#fbbf24" roughness={0.8} />
+      </Sphere>
+      {/* Rings */}
+      <mesh rotation={[Math.PI / 2.5, 0, 0]}>
+        <ringGeometry args={[2, 3.5, 64]} />
+        <meshStandardMaterial color="#d97706" side={THREE.DoubleSide} transparent opacity={0.6} />
+      </mesh>
+    </group>
+  );
+};
+
+const SpaceWallpaper = () => {
+  return (
+    <div className="fixed inset-0 pointer-events-none z-0">
+      <Canvas camera={{ position: [0, 0, 10] }}>
+        <ambientLight intensity={0.2} />
+        <pointLight position={[10, 10, 10]} intensity={1.5} color="#fb923c" />
+        <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+        <Saturn />
+        <FallingStars />
+      </Canvas>
+    </div>
+  );
+};
+
+const AIGameLab = ({ onGameCreated }: { onGameCreated: (code: string) => void }) => {
+  const [prompt, setPrompt] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  const generateGame = async () => {
+    if (!prompt.trim()) return;
+    setIsGenerating(true);
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Generate a simple, self-contained React component for a mini-game based on this prompt: "${prompt}". 
+        The game should be fun, visual, and use Tailwind CSS. 
+        Return ONLY the code for the component, no markdown blocks, no extra text. 
+        The component should be named 'MiniGame'. 
+        Use standard React hooks. 
+        Assume 'lucide-react' and 'motion/react' are available.`,
+      });
+      const code = response.text || "";
+      onGameCreated(code);
+    } catch (err) {
+      console.error("AI Generation failed", err);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  return (
+    <div className="p-6 bg-neutral-900/80 backdrop-blur-xl border border-neutral-800 rounded-3xl space-y-4">
+      <div className="flex items-center gap-3 mb-4">
+        <Cpu className="w-6 h-6 text-orange-500" />
+        <h3 className="text-xl font-black text-white uppercase italic tracking-tight">AI Game Lab</h3>
+      </div>
+      <p className="text-sm text-neutral-400">Ask the AI to create a mini-game for you to play while you chat.</p>
+      <div className="flex gap-3">
+        <input 
+          type="text"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="e.g. A space dodger game with falling stars..."
+          className="flex-1 bg-neutral-800 border border-neutral-700 text-white px-4 py-3 rounded-2xl focus:outline-none focus:border-orange-500 transition-all"
+        />
+        <button 
+          onClick={generateGame}
+          disabled={isGenerating}
+          className="bg-orange-500 hover:bg-orange-600 text-white font-black px-6 py-3 rounded-2xl transition-all shadow-lg shadow-orange-500/20 uppercase italic tracking-widest disabled:opacity-50"
+        >
+          {isGenerating ? <Activity className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+        </button>
+      </div>
+    </div>
+  );
+};
 
 interface ChatMessage {
   sender: string;
@@ -84,6 +223,8 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [privateRoomInput, setPrivateRoomInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [activeTab, setActiveTab] = useState<"chat" | "lab">("chat");
+  const [generatedGameCode, setGeneratedGameCode] = useState<string | null>(null);
 
   const lobbySocketRef = useRef<WebSocket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -280,24 +421,32 @@ export default function App() {
   const handleRemoteStream = (peerId: string, stream: MediaStream) => {
     console.log(`[Voice] Received remote stream from ${peerId}`);
     
-    // Create audio element
-    const audio = new Audio();
+    // Create audio element and append to DOM to ensure it's not throttled
+    let audio = audioRefs.current[peerId];
+    if (!audio) {
+      audio = document.createElement("audio");
+      audio.autoplay = true;
+      (audio as any).playsInline = true;
+      audio.style.display = "none";
+      document.body.appendChild(audio);
+      audioRefs.current[peerId] = audio;
+    }
+    
     audio.srcObject = stream;
-    audio.autoplay = true;
-    (audio as any).playsInline = true;
     if ((audio as any).setSinkId && selectedAudioOutputDevice) {
       (audio as any).setSinkId(selectedAudioOutputDevice).catch(console.error);
     }
-    audioRefs.current[peerId] = audio;
     
     // Attempt to play (browsers might block)
     audio.play().catch(err => {
       console.warn(`[Voice] Autoplay blocked for ${peerId}, waiting for user interaction`, err);
-      // We can show a "Click to enable audio" button if needed, but usually interaction has already happened
     });
 
     // Speaking detection
     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
     const source = audioCtxRef.current.createMediaStreamSource(stream);
     const analyzer = audioCtxRef.current.createAnalyser();
     analyzer.fftSize = 512;
@@ -329,6 +478,11 @@ export default function App() {
         throw new Error("Voice chat requires a secure (HTTPS) connection.");
       }
       setIsVoiceJoining(true);
+
+      // Ensure AudioContext is resumed
+      if (audioCtxRef.current?.state === 'suspended') {
+        await audioCtxRef.current.resume();
+      }
 
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
@@ -459,9 +613,17 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans flex flex-col md:flex-row overflow-hidden">
+    <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans flex flex-col md:flex-row overflow-hidden relative"
+      onClick={() => {
+        if (audioCtxRef.current?.state === 'suspended') {
+          audioCtxRef.current.resume();
+        }
+      }}
+    >
+      <SpaceWallpaper />
+      
       {/* Sidebar */}
-      <aside className="w-full md:w-80 bg-neutral-900 border-r border-neutral-800 flex flex-col shrink-0">
+      <aside className="w-full md:w-80 bg-neutral-900/80 backdrop-blur-xl border-r border-neutral-800 flex flex-col shrink-0 relative z-10">
         <div className="p-6 border-b border-neutral-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center shadow-lg shadow-orange-500/20">
@@ -612,13 +774,30 @@ export default function App() {
         </div>
 
         <header className="p-6 border-b border-neutral-900 flex items-center justify-between relative z-10">
-          <div>
-            <h2 className="text-lg font-black text-white uppercase italic tracking-tight">
-              {voiceRoomId ? `# ${voiceRoomId.replace("_", " ")}` : "Global Chat"}
-            </h2>
-            <p className="text-xs text-neutral-500 font-bold uppercase tracking-widest">
-              {voiceRoomId ? "Voice Connected" : "Select a channel to join voice"}
-            </p>
+          <div className="flex items-center gap-6">
+            <div>
+              <h2 className="text-lg font-black text-white uppercase italic tracking-tight">
+                {voiceRoomId ? `# ${voiceRoomId.replace("_", " ")}` : "Global Hub"}
+              </h2>
+              <p className="text-xs text-neutral-500 font-bold uppercase tracking-widest">
+                {voiceRoomId ? "Voice Connected" : "Select a channel to join voice"}
+              </p>
+            </div>
+            
+            <nav className="hidden lg:flex items-center gap-1 bg-neutral-900/50 p-1 rounded-xl border border-neutral-800">
+              <button 
+                onClick={() => setActiveTab("chat")}
+                className={`px-4 py-2 rounded-lg text-xs font-black uppercase italic transition-all ${activeTab === "chat" ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20" : "text-neutral-500 hover:text-neutral-300"}`}
+              >
+                Chat
+              </button>
+              <button 
+                onClick={() => setActiveTab("lab")}
+                className={`px-4 py-2 rounded-lg text-xs font-black uppercase italic transition-all ${activeTab === "lab" ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20" : "text-neutral-500 hover:text-neutral-300"}`}
+              >
+                AI Lab
+              </button>
+            </nav>
           </div>
           <div className="flex items-center gap-4">
             <button 
@@ -640,24 +819,58 @@ export default function App() {
         </header>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4 relative z-10">
-          <AnimatePresence initial={false}>
-            {chatMessages.map((msg, i) => (
-              <motion.div 
-                key={i}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="flex flex-col gap-1"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="text-xs font-black text-orange-500 uppercase italic">{msg.sender}</span>
-                  <span className="text-[10px] text-neutral-600 font-bold">{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          {activeTab === "chat" ? (
+            <AnimatePresence initial={false}>
+              {chatMessages.map((msg, i) => (
+                <motion.div 
+                  key={i}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="flex flex-col gap-1"
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs font-black text-orange-500 uppercase italic">{msg.sender}</span>
+                    <span className="text-[10px] text-neutral-600 font-bold">{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                  </div>
+                  <p className="text-sm text-neutral-300 leading-relaxed max-w-2xl bg-neutral-900/50 p-3 rounded-2xl border border-neutral-800/50">
+                    {msg.text}
+                  </p>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          ) : (
+            <div className="max-w-4xl mx-auto w-full space-y-8">
+              <AIGameLab onGameCreated={(code) => setGeneratedGameCode(code)} />
+              
+              {generatedGameCode && (
+                <div className="bg-neutral-900/80 backdrop-blur-xl border border-neutral-800 rounded-3xl p-8 min-h-[400px] flex flex-col">
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-3">
+                      <Gamepad2 className="w-5 h-5 text-orange-500" />
+                      <h4 className="text-sm font-black text-white uppercase italic tracking-tight">Generated Game</h4>
+                    </div>
+                    <button 
+                      onClick={() => setGeneratedGameCode(null)}
+                      className="text-xs font-bold text-neutral-500 hover:text-red-500 uppercase tracking-widest"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="flex-1 flex items-center justify-center bg-neutral-950 rounded-2xl border border-neutral-800 overflow-hidden relative">
+                    {/* Game Sandbox Simulation */}
+                    <div className="text-center p-8">
+                      <Rocket className="w-12 h-12 text-orange-500 mx-auto mb-4 animate-bounce" />
+                      <h5 className="text-lg font-black text-white uppercase italic mb-2">Game Ready!</h5>
+                      <p className="text-sm text-neutral-500 mb-6 max-w-xs">The AI has generated your game code. In a full production environment, this would be dynamically rendered here.</p>
+                      <pre className="text-[10px] text-left bg-black p-4 rounded-xl overflow-auto max-h-40 border border-neutral-800 text-orange-400 font-mono">
+                        {generatedGameCode.slice(0, 500)}...
+                      </pre>
+                    </div>
+                  </div>
                 </div>
-                <p className="text-sm text-neutral-300 leading-relaxed max-w-2xl bg-neutral-900/50 p-3 rounded-2xl border border-neutral-800/50">
-                  {msg.text}
-                </p>
-              </motion.div>
-            ))}
-          </AnimatePresence>
+              )}
+            </div>
+          )}
           <div className="h-4" />
         </div>
 
