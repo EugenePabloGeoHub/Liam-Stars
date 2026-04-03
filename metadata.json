@@ -1,5 +1,5 @@
 {
-  "name": "LiamStars",
-  "description": "A real-time multiplayer top-down shooter game inspired by Brawl Stars.",
+  "name": "VoiceHub",
+  "description": "A dedicated real-time voice chat platform with custom rooms and high-quality audio.",
   "requestFramePermissions": ["microphone"]
 }
