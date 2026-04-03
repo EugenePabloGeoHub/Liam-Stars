@@ -26,11 +26,6 @@ export const PixelJump = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
 
           if (ny > 100) {
             setIsPlaying(false);
-            onScoreUpdate(score);
-            if (score > highScore) {
-              setHighScore(score);
-              localStorage.setItem('pixel_high_score', score.toString());
-            }
             return p;
           }
 
@@ -99,6 +94,16 @@ export const PixelJump = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
       };
+    }
+  }, [isPlaying, score, highScore, onScoreUpdate]);
+
+  useEffect(() => {
+    if (!isPlaying && score > 0) {
+      onScoreUpdate(score);
+      if (score > highScore) {
+        setHighScore(score);
+        localStorage.setItem('pixel_high_score', score.toString());
+      }
     }
   }, [isPlaying, score, highScore, onScoreUpdate]);
 

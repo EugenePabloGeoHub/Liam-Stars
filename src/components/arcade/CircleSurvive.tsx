@@ -34,7 +34,6 @@ export const CircleSurvive = ({ onExit, onScoreUpdate }: { onExit: () => void, o
     if (dist > ringSize / 10) { // Simple scaling for dist check
       setGameOver(true);
       setIsPlaying(false);
-      onScoreUpdate(score);
     } else {
       setScore(s => s + 1);
     }
@@ -48,6 +47,12 @@ export const CircleSurvive = ({ onExit, onScoreUpdate }: { onExit: () => void, o
     }
     return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
   }, [isPlaying, update]);
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const handleMouseMove = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isPlaying || !containerRef.current) return;

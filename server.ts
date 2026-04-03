@@ -15,11 +15,20 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   // Game State
-  const allPlayers: Record<string, { id: string, name: string, partyId: string | null, level: number, xp: number, highScores: Record<string, number> }> = {};
+  const allPlayers: Record<string, { id: string, name: string, partyId: string | null, highScores: Record<string, number> }> = {};
   const lobbyConnections: Record<string, { ws: WebSocket, playerId: string }> = {};
   const parties: Record<string, { id: string, leaderId: string, members: string[] }> = {};
   const voiceRooms: Record<string, Set<string>> = {}; // roomId -> Set of playerIds
   const playerVoiceRoom: Record<string, string> = {}; // playerId -> roomId
+  const pongRooms: Record<string, string[]> = {}; // roomId -> [p1Id, p2Id]
+  const matchmakingQueues: Record<string, string[]> = {
+    "block_blast": [],
+    "online_pong": [],
+    "neon_duel": [],
+    "speed_typer": [],
+    "grid_race": []
+  };
+  const gameRooms: Record<string, { mode: string, players: string[], state: any }> = {};
 
   const broadcastLobbyUpdate = () => {
     const onlinePlayerIds = new Set(Object.values(lobbyConnections).map(c => c.playerId));
@@ -29,7 +38,7 @@ async function startServer() {
       leaderboard: Object.values(allPlayers)
         .sort((a, b) => (Object.values(b.highScores).reduce((sum, s) => sum + s, 0)) - (Object.values(a.highScores).reduce((sum, s) => sum + s, 0)))
         .slice(0, 10)
-        .map(p => ({ name: p.name, score: Object.values(p.highScores).reduce((sum, s) => sum + s, 0), level: p.level }))
+        .map(p => ({ name: p.name, score: Object.values(p.highScores).reduce((sum, s) => sum + s, 0) }))
     });
 
     Object.values(lobbyConnections).forEach(conn => {
@@ -78,8 +87,6 @@ async function startServer() {
               id: playerId, 
               name: message.name, 
               partyId: null,
-              level: 1,
-              xp: 0,
               highScores: {}
             };
           } else {
@@ -103,16 +110,8 @@ async function startServer() {
 
         case "HIGH_SCORE_UPDATE":
           if (allPlayers[playerId]) {
-            const { game, score, xp } = message;
+            const { game, score } = message;
             allPlayers[playerId].highScores[game] = Math.max(allPlayers[playerId].highScores[game] || 0, score);
-            allPlayers[playerId].xp += xp || 0;
-            
-            // Level up logic
-            const nextLevelXp = allPlayers[playerId].level * 1000;
-            if (allPlayers[playerId].xp >= nextLevelXp) {
-              allPlayers[playerId].level++;
-              allPlayers[playerId].xp -= nextLevelXp;
-            }
             
             broadcastLobbyUpdate();
           }
@@ -265,6 +264,106 @@ async function startServer() {
               broadcastPartyUpdate(pId);
             }
             ws.send(JSON.stringify({ type: "PARTY_UPDATE", party: null }));
+          }
+          break;
+
+        case "PONG_JOIN":
+          if (!pongRooms[message.roomId]) pongRooms[message.roomId] = [];
+          if (!pongRooms[message.roomId].includes(playerId)) {
+            pongRooms[message.roomId].push(playerId);
+          }
+          ws.send(JSON.stringify({ 
+            type: "PONG_INIT", 
+            isHost: pongRooms[message.roomId][0] === playerId 
+          }));
+          break;
+
+        case "PONG_SYNC":
+          // Forward game state to other player in room
+          pongRooms[message.roomId]?.forEach(pId => {
+            if (pId !== playerId) {
+              Object.values(lobbyConnections).forEach(conn => {
+                if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
+                  conn.ws.send(JSON.stringify({ type: "PONG_UPDATE", state: message.state }));
+                }
+              });
+            }
+          });
+          break;
+
+        case "PONG_PADDLE":
+          // Forward paddle position to other player
+          pongRooms[message.roomId]?.forEach(pId => {
+            if (pId !== playerId) {
+              Object.values(lobbyConnections).forEach(conn => {
+                if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
+                  conn.ws.send(JSON.stringify({ 
+                    type: "PONG_PADDLE_UPDATE", 
+                    player: message.player, 
+                    pos: message.pos 
+                  }));
+                }
+              });
+            }
+          });
+          break;
+
+        case "MATCHMAKING_JOIN":
+          const mode = message.mode;
+          if (!matchmakingQueues[mode]) matchmakingQueues[mode] = [];
+          if (!matchmakingQueues[mode].includes(playerId)) {
+            matchmakingQueues[mode].push(playerId);
+          }
+
+          if (matchmakingQueues[mode].length >= 2) {
+            const p1 = matchmakingQueues[mode].shift()!;
+            const p2 = matchmakingQueues[mode].shift()!;
+            const roomId = nanoid();
+            gameRooms[roomId] = { mode, players: [p1, p2], state: {} };
+
+            const matchFound = (pId: string, opponentId: string, isHost: boolean) => {
+              Object.values(lobbyConnections).forEach(conn => {
+                if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
+                  conn.ws.send(JSON.stringify({
+                    type: "MATCH_FOUND",
+                    mode,
+                    roomId,
+                    opponentName: allPlayers[opponentId]?.name || "Opponent",
+                    isHost
+                  }));
+                }
+              });
+            };
+
+            matchFound(p1, p2, true);
+            matchFound(p2, p1, false);
+          }
+          break;
+
+        case "MATCHMAKING_LEAVE":
+          Object.keys(matchmakingQueues).forEach(m => {
+            matchmakingQueues[m] = matchmakingQueues[m].filter(id => id !== playerId);
+          });
+          break;
+
+        case "GAME_SYNC":
+          // Generic game state sync for new games
+          const gRoomId = message.roomId;
+          const room = gameRooms[gRoomId];
+          if (room) {
+            room.players.forEach(pId => {
+              if (pId !== playerId) {
+                Object.values(lobbyConnections).forEach(conn => {
+                  if (conn.playerId === pId && conn.ws.readyState === WebSocket.OPEN) {
+                    conn.ws.send(JSON.stringify({ 
+                      type: "GAME_UPDATE", 
+                      state: message.state,
+                      senderId: playerId
+                    }));
+                  }
+                });
+              }
+            });
           }
           break;
       }

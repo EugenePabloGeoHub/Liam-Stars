@@ -18,7 +18,6 @@ export const PulseWave = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
         if (s >= 300) {
           setIsPlaying(false);
           setGameOver(true);
-          onScoreUpdate(score);
           return s;
         }
         return s + 2;
@@ -47,9 +46,14 @@ export const PulseWave = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
     } else {
       setGameOver(true);
       setIsPlaying(false);
-      onScoreUpdate(score);
     }
   };
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);

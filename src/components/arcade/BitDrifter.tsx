@@ -32,7 +32,6 @@ export const BitDrifter = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
       if (collision) {
         setGameOver(true);
         setIsPlaying(false);
-        onScoreUpdate(score);
         return prev;
       }
 
@@ -58,6 +57,12 @@ export const BitDrifter = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);

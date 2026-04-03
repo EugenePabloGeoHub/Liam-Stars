@@ -33,7 +33,6 @@ export const NeonPaddle = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
       if (newY >= 100) {
         setGameOver(true);
         setIsPlaying(false);
-        onScoreUpdate(score);
         return prev;
       }
 
@@ -50,6 +49,12 @@ export const NeonPaddle = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
     }
     return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
   }, [isPlaying, update]);
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const handleMouseMove = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isPlaying) return;

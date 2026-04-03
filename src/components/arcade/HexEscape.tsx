@@ -35,7 +35,6 @@ export const HexEscape = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
       if (collision) {
         setGameOver(true);
         setIsPlaying(false);
-        onScoreUpdate(score);
         return prev;
       }
 
@@ -61,6 +60,12 @@ export const HexEscape = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);

@@ -25,13 +25,16 @@ interface ShapeInstance {
   used: boolean;
 }
 
-export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onScoreUpdate: (score: number) => void }) => {
+export const BlockBlast = ({ onExit, onScoreUpdate, socket, playerId, roomId, isHost, opponentName }: { onExit: () => void, onScoreUpdate: (score: number) => void, socket?: WebSocket | null, playerId?: string, roomId?: string, isHost?: boolean, opponentName?: string }) => {
   const [grid, setGrid] = useState<(string | null)[][]>(Array(GRID_SIZE).fill(null).map(() => Array(GRID_SIZE).fill(null)));
   const [score, setScore] = useState(0);
+  const [opponentScore, setOpponentScore] = useState(0);
   const [highScore, setHighScore] = useState(() => Number(localStorage.getItem('block_high_score') || 0));
   const [gameOver, setGameOver] = useState(false);
+  const [opponentGameOver, setOpponentGameOver] = useState(false);
   const [currentShapes, setCurrentShapes] = useState<ShapeInstance[]>([]);
   const [preview, setPreview] = useState<{ r: number, c: number, shape: ShapeInstance } | null>(null);
+  const [winner, setWinner] = useState<string | null>(null);
   
   const gridRef = useRef<HTMLDivElement>(null);
 
@@ -57,6 +60,33 @@ export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
     }
     return true;
   };
+
+  useEffect(() => {
+    if (!socket || !roomId) return;
+
+    const handleMessage = (e: MessageEvent) => {
+      const data = JSON.parse(e.data);
+      if (data.type === "GAME_UPDATE") {
+        if (data.state.score !== undefined) {
+          setOpponentScore(data.state.score);
+        }
+        if (data.state.gameOver) {
+          setOpponentGameOver(true);
+        }
+      }
+    };
+
+    socket.addEventListener("message", handleMessage);
+    return () => socket.removeEventListener("message", handleMessage);
+  }, [socket, roomId]);
+
+  useEffect(() => {
+    if (gameOver && opponentGameOver) {
+      if (score > opponentScore) setWinner("You");
+      else if (score < opponentScore) setWinner("Opponent");
+      else setWinner("Draw");
+    }
+  }, [gameOver, opponentGameOver, score, opponentScore]);
 
   const placeShape = (shape: ShapeInstance, row: number, col: number) => {
     if (!canPlace(shape.matrix, row, col, grid)) return;
@@ -99,8 +129,17 @@ export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
     const blockCount = shape.matrix.flat().filter(x => x === 1).length;
     const points = (blockCount * 10) + (linesCleared * 100 * (linesCleared > 1 ? linesCleared : 1));
     
+    const newScore = score + points;
     setGrid(newGrid);
-    setScore(s => s + points);
+    setScore(newScore);
+
+    if (socket && roomId) {
+      socket.send(JSON.stringify({
+        type: "GAME_SYNC",
+        roomId,
+        state: { score: newScore }
+      }));
+    }
 
     const nextShapes = currentShapes.map(s => s.id === shape.id ? { ...s, used: true } : s);
     setCurrentShapes(nextShapes);
@@ -109,7 +148,7 @@ export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
       generateShapes();
     }
 
-    checkGameOver(newGrid, nextShapes.every(s => s.used) ? SHAPES.map(s => ({ ...s, used: false, id: 0 })) : nextShapes.filter(s => !s.used), score + points);
+    checkGameOver(newGrid, nextShapes.every(s => s.used) ? SHAPES.map(s => ({ ...s, used: false, id: 0 })) : nextShapes.filter(s => !s.used), newScore);
   };
 
   const checkGameOver = (currentGrid: (string | null)[][], shapesToCheck: any[], currentScore: number) => {
@@ -128,13 +167,25 @@ export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
 
     if (!possibleMove) {
       setGameOver(true);
-      onScoreUpdate(currentScore);
+      if (socket && roomId) {
+        socket.send(JSON.stringify({
+          type: "GAME_SYNC",
+          roomId,
+          state: { gameOver: true }
+        }));
+      }
       if (currentScore > highScore) {
         setHighScore(currentScore);
         localStorage.setItem('block_high_score', currentScore.toString());
       }
     }
   };
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const handleDrag = (event: any, info: any, shape: ShapeInstance) => {
     if (!gridRef.current) return;
@@ -173,16 +224,32 @@ export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
     <div className="fixed inset-0 bg-[#0a0a0c] z-50 flex flex-col items-center justify-center font-sans overflow-hidden">
       {/* Header */}
       <div className="absolute top-0 left-0 right-0 p-8 flex justify-between items-start z-10 pointer-events-none">
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30">Current Score</span>
-          <motion.span 
-            key={score}
-            initial={{ scale: 1.2, color: '#fff' }}
-            animate={{ scale: 1, color: '#fff' }}
-            className="text-5xl font-black italic tracking-tighter"
-          >
-            {score}
-          </motion.span>
+        <div className="flex gap-12">
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30">Your Score</span>
+            <motion.span 
+              key={score}
+              initial={{ scale: 1.2, color: '#fff' }}
+              animate={{ scale: 1, color: '#fff' }}
+              className="text-5xl font-black italic tracking-tighter"
+            >
+              {score}
+            </motion.span>
+          </div>
+
+          {roomId && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30">{opponentName || 'Opponent'}'s Score</span>
+              <motion.span 
+                key={opponentScore}
+                initial={{ scale: 1.2, color: '#f97316' }}
+                animate={{ scale: 1, color: '#f97316' }}
+                className="text-5xl font-black italic tracking-tighter text-orange-500"
+              >
+                {opponentScore}
+              </motion.span>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col items-center gap-2 pointer-events-auto">
@@ -298,8 +365,12 @@ export const BlockBlast = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
                 <X className="w-12 h-12 text-white" />
               </div>
               
-              <h2 className="text-6xl font-black uppercase italic tracking-tighter text-white mb-2">BLASTED!</h2>
-              <p className="text-white/40 font-bold uppercase tracking-[0.3em] text-[10px] mb-10">No more moves available</p>
+              <h2 className="text-6xl font-black uppercase italic tracking-tighter text-white mb-2">
+                {winner ? (winner === "You" ? "VICTORY!" : winner === "Draw" ? "DRAW!" : "DEFEAT!") : "BLASTED!"}
+              </h2>
+              <p className="text-white/40 font-bold uppercase tracking-[0.3em] text-[10px] mb-10">
+                {winner ? `Final Score Battle` : `No more moves available`}
+              </p>
               
               <div className="grid grid-cols-2 gap-4 mb-10">
                 <div className="bg-white/5 p-6 rounded-3xl border border-white/5">

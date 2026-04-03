@@ -25,11 +25,6 @@ export const GridRunner = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
           const hit = next.find(b => b.y > 85 && b.y < 95 && Math.abs(b.x - playerPos) < 10);
           if (hit) {
             setIsPlaying(false);
-            onScoreUpdate(score);
-            if (score > highScore) {
-              setHighScore(score);
-              localStorage.setItem('grid_high_score', score.toString());
-            }
             return [];
           }
           const filtered = next.filter(b => b.y < 110);
@@ -58,6 +53,15 @@ export const GridRunner = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
     setPlayerPos(Math.max(5, Math.min(95, x)));
   };
 
+  useEffect(() => {
+    if (!isPlaying && score > 0) {
+      onScoreUpdate(score);
+      if (score > highScore) {
+        setHighScore(score);
+        localStorage.setItem('grid_high_score', score.toString());
+      }
+    }
+  }, [isPlaying, score, highScore, onScoreUpdate]);
   const startGame = () => {
     setScore(0);
     setBlocks([]);

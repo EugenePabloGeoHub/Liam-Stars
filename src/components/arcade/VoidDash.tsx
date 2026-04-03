@@ -31,11 +31,6 @@ export const VoidDash = ({ onExit, onScoreUpdate }: { onExit: () => void, onScor
 
           if (ny < 0 || ny > 100) {
             setIsPlaying(false);
-            onScoreUpdate(score);
-            if (score > highScore) {
-              setHighScore(score);
-              localStorage.setItem('void_high_score', score.toString());
-            }
             return p;
           }
 
@@ -47,11 +42,6 @@ export const VoidDash = ({ onExit, onScoreUpdate }: { onExit: () => void, onScor
             );
             if (hit) {
               setIsPlaying(false);
-              onScoreUpdate(score);
-              if (score > highScore) {
-                setHighScore(score);
-                localStorage.setItem('void_high_score', score.toString());
-              }
               return [];
             }
             const next = prev.map(obs => ({ ...obs, x: obs.x - 0.5 }));
@@ -86,6 +76,16 @@ export const VoidDash = ({ onExit, onScoreUpdate }: { onExit: () => void, onScor
     osc.start();
     osc.stop(audioCtx.currentTime + 0.1);
   };
+
+  useEffect(() => {
+    if (!isPlaying && score > 0) {
+      onScoreUpdate(score);
+      if (score > highScore) {
+        setHighScore(score);
+        localStorage.setItem('void_high_score', score.toString());
+      }
+    }
+  }, [isPlaying, score, highScore, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);

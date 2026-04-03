@@ -42,7 +42,6 @@ export const MemoryGrid = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
 
     if (index !== sequence[userSequence.length]) {
       setGameOver(true);
-      onScoreUpdate(score);
       return;
     }
 
@@ -52,6 +51,12 @@ export const MemoryGrid = ({ onExit, onScoreUpdate }: { onExit: () => void, onSc
       setTimeout(() => generateSequence(INITIAL_SEQUENCE_LENGTH + level), 1000);
     }
   };
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);

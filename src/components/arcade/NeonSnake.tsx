@@ -38,7 +38,6 @@ export const NeonSnake = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
       if (prevSnake.some(segment => segment.x === newHead.x && segment.y === newHead.y)) {
         setGameOver(true);
         setIsPaused(true);
-        onScoreUpdate(score);
         return prevSnake;
       }
 
@@ -52,6 +51,12 @@ export const NeonSnake = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
       return newSnake;
     });
   }, [direction, food, score, generateFood, onScoreUpdate]);
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   useEffect(() => {
     if (!isPaused && !gameOver) {

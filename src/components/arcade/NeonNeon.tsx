@@ -14,7 +14,7 @@ export const NeonNeon = ({ onExit, onScoreUpdate }: { onExit: () => void, onScor
     if (isPlaying && timeLeft > 0) {
       const timer = setInterval(() => setTimeLeft(t => t - 1), 1000);
       return () => clearInterval(timer);
-    } else if (timeLeft === 0) {
+    } else if (timeLeft === 0 && isPlaying) {
       setIsPlaying(false);
       onScoreUpdate(score);
       if (score > highScore) {

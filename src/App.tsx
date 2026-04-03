@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import Peer from "simple-peer";
 import { 
@@ -26,24 +26,15 @@ import {
   Music,
   ArrowUp,
   Trophy,
-  LayoutGrid
+  LayoutGrid,
+  Loader2,
+  ArrowRight
 } from "lucide-react";
-import { NeonNeon } from './components/arcade/NeonNeon';
-import { GridRunner } from './components/arcade/GridRunner';
-import { SynthWave } from './components/arcade/SynthWave';
-import { PixelJump } from './components/arcade/PixelJump';
-import { VoidDash } from './components/arcade/VoidDash';
 import { BlockBlast } from './components/arcade/BlockBlast';
-import { NeonSnake } from './components/arcade/NeonSnake';
-import { ColorMatch } from './components/arcade/ColorMatch';
-import { MemoryGrid } from './components/arcade/MemoryGrid';
-import { SpeedTyper } from './components/arcade/SpeedTyper';
-import { CircleSurvive } from './components/arcade/CircleSurvive';
-import { GravityBall } from './components/arcade/GravityBall';
-import { NeonPaddle } from './components/arcade/NeonPaddle';
-import { HexEscape } from './components/arcade/HexEscape';
-import { BitDrifter } from './components/arcade/BitDrifter';
-import { PulseWave } from './components/arcade/PulseWave';
+import { OnlinePong } from './components/arcade/OnlinePong';
+import { NeonDuel } from './components/arcade/NeonDuel';
+import { SpeedTyperDuel } from './components/arcade/SpeedTyperDuel';
+import { GridRace } from './components/arcade/GridRace';
 
 interface PartyMember {
   id: string;
@@ -54,7 +45,6 @@ interface PartyMember {
 interface LeaderboardEntry {
   name: string;
   score: number;
-  level: number;
 }
 
 interface Party {
@@ -62,6 +52,44 @@ interface Party {
   leaderId: string;
   members: PartyMember[];
 }
+
+const VoiceVisualizer = ({ analyzer, isMuted }: { analyzer: AnalyserNode | null, isMuted?: boolean }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!analyzer || isMuted) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let animationFrame: number;
+    const bufferLength = analyzer.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    const draw = () => {
+      animationFrame = requestAnimationFrame(draw);
+      analyzer.getByteFrequencyData(dataArray);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const barWidth = (canvas.width / bufferLength) * 4;
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = (dataArray[i] / 255) * canvas.height;
+        ctx.fillStyle = `rgba(249, 115, 22, ${dataArray[i] / 255})`; // orange-500 with dynamic opacity
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        x += barWidth + 1;
+      }
+    };
+
+    draw();
+    return () => cancelAnimationFrame(animationFrame);
+  }, [analyzer, isMuted]);
+
+  return <canvas ref={canvasRef} width={100} height={20} className="w-24 h-4 rounded-full" />;
+};
 
 export default function App() {
   const [persistentId] = useState(() => {
@@ -72,14 +100,16 @@ export default function App() {
     return newId;
   });
   const [gameState, setGameState] = useState<"lobby" | "playing">("lobby");
-  const [gameMode, setGameMode] = useState<"neon_neon" | "grid_runner" | "synth_wave" | "pixel_jump" | "void_dash" | "block_blast" | "neon_snake" | "color_match" | "memory_grid" | "speed_typer" | "circle_survive" | "gravity_ball" | "neon_paddle" | "hex_escape" | "bit_drifter" | "pulse_wave">("neon_neon");
+  const [gameMode, setGameMode] = useState<"block_blast" | "online_pong" | "neon_duel" | "speed_typer" | "grid_race">("block_blast");
+  const [isMatchmaking, setIsMatchmaking] = useState(false);
+  const [matchmakingMode, setMatchmakingMode] = useState<string | null>(null);
+  const [opponentName, setOpponentName] = useState("");
+  const [isPongHost, setIsPongHost] = useState(false);
   const [playerName, setPlayerName] = useState(() => localStorage.getItem("playerName") || "Brawler_" + Math.floor(Math.random() * 1000));
   const [playerNameInput, setPlayerNameInput] = useState(playerName);
   const [roomId, setRoomId] = useState("");
 
   // Player Stats
-  const [xp, setXp] = useState(() => Number(localStorage.getItem("xp")) || 0);
-  const [level, setLevel] = useState(() => Number(localStorage.getItem("level")) || 1);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [neonColor, setNeonColor] = useState(() => localStorage.getItem("neonColor") || "orange");
   const [isAudioEnabled, setIsAudioEnabled] = useState(() => localStorage.getItem("isAudioEnabled") !== "false");
@@ -87,7 +117,6 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [difficulty, setDifficulty] = useState<"easy" | "medium" | "hard">("medium");
   const [isSearching, setIsSearching] = useState(false);
-  const [dailyChallenge] = useState({ game: "neon_neon", goal: 5000, reward: 500 });
 
   // Lobby & Party State
   const [searchQuery, setSearchQuery] = useState("");
@@ -98,13 +127,17 @@ export default function App() {
   const [voiceRoomInput, setVoiceRoomInput] = useState("");
   const [isVoiceMuted, setIsVoiceMuted] = useState(false);
   const [voicePeers, setVoicePeers] = useState<string[]>([]);
+  const [speakingPeers, setSpeakingPeers] = useState<Set<string>>(new Set());
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Record<string, any>>({});
   const audioRefs = useRef<Record<string, HTMLAudioElement>>({});
+  const analyzersRef = useRef<Record<string, AnalyserNode>>({});
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const [onlineCount, setOnlineCount] = useState(0);
-  const [isOffline, setIsOffline] = useState(true);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedAudioDevice, setSelectedAudioDevice] = useState(() => localStorage.getItem("selectedAudioDevice") || "");
+  const [audioOutputDevices, setAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioOutputDevice, setSelectedAudioOutputDevice] = useState(() => localStorage.getItem("selectedAudioOutputDevice") || "");
   const [chatMessages, setChatMessages] = useState<{ sender: string, text: string, timestamp: number, scope: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const lobbySocketRef = useRef<WebSocket | null>(null);
@@ -115,9 +148,16 @@ export default function App() {
         await navigator.mediaDevices.getUserMedia({ audio: true });
         const devices = await navigator.mediaDevices.enumerateDevices();
         const audioInputs = devices.filter(d => d.kind === "audioinput");
+        const audioOutputs = devices.filter(d => d.kind === "audiooutput");
+        
         setAudioDevices(audioInputs);
+        setAudioOutputDevices(audioOutputs);
+        
         if (!selectedAudioDevice && audioInputs.length > 0) {
           setSelectedAudioDevice(audioInputs[0].deviceId);
+        }
+        if (!selectedAudioOutputDevice && audioOutputs.length > 0) {
+          setSelectedAudioOutputDevice(audioOutputs[0].deviceId);
         }
       } catch (err) {
         console.error("Error getting audio devices", err);
@@ -131,9 +171,14 @@ export default function App() {
   }, [selectedAudioDevice]);
 
   useEffect(() => {
-    localStorage.setItem("xp", xp.toString());
-    localStorage.setItem("level", level.toString());
-  }, [xp, level]);
+    localStorage.setItem("selectedAudioOutputDevice", selectedAudioOutputDevice);
+    // Update existing audio elements
+    Object.values(audioRefs.current).forEach(audio => {
+      if ((audio as any).setSinkId) {
+        (audio as any).setSinkId(selectedAudioOutputDevice);
+      }
+    });
+  }, [selectedAudioOutputDevice]);
 
   useEffect(() => {
     localStorage.setItem("playerName", playerName);
@@ -141,7 +186,7 @@ export default function App() {
       connectLobby();
     }
     return () => lobbySocketRef.current?.close();
-  }, [gameState]); // Removed playerName from dependencies to prevent reconnection on every keystroke
+  }, [gameState]);
 
   useEffect(() => {
     if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
@@ -155,27 +200,24 @@ export default function App() {
     lobbySocketRef.current = socket;
 
     socket.onopen = () => {
-      setIsOffline(false);
       socket.send(JSON.stringify({ type: "LOBBY_JOIN", name: playerName, playerId: persistentId }));
       socket.send(JSON.stringify({ type: "SEARCH_PLAYERS", query: "", playerId: persistentId }));
     };
 
     socket.onclose = () => {
-      setIsOffline(true);
+      setTimeout(() => {
+        if (gameState === "lobby") connectLobby();
+      }, 3000);
     };
 
     socket.onerror = () => {
-      setIsOffline(true);
+      // Error handling
     };
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       switch (data.type) {
         case "LOBBY_INIT":
-          if (data.player) {
-            setLevel(data.player.level);
-            setXp(data.player.xp);
-          }
           setOnlineCount(data.onlineCount || 0);
           break;
         case "LOBBY_UPDATE":
@@ -205,12 +247,27 @@ export default function App() {
           break;
         case "VOICE_JOIN_SUCCESS":
           setVoiceRoomId(data.roomId);
+          setIsVoiceJoining(false);
+          setVoiceRoomInput(""); // Clear input on success
           // Initiate connections to existing peers
           data.peers.forEach((peerId: string) => {
             const peer = createPeer(peerId, persistentId, localStreamRef.current!);
             peersRef.current[peerId] = peer;
           });
           setVoicePeers(data.peers);
+          break;
+        case "PONG_INIT":
+          setIsPongHost(data.isHost);
+          break;
+        case "MATCH_FOUND":
+          setIsMatchmaking(false);
+          setMatchmakingMode(null);
+          setRoomId(data.roomId);
+          setOpponentName(data.opponentName);
+          setIsPongHost(data.isHost);
+          setGameMode(data.mode);
+          setGameState("playing");
+          playSound(800, "sine", 0.3);
           break;
         case "VOICE_PEER_JOINED":
           // Wait for them to send a signal (they are the initiator)
@@ -282,36 +339,22 @@ export default function App() {
     }
   };
 
-  const updateHighScore = (game: string, score: number, earnedXp: number) => {
-    // Local XP/Level update for offline compatibility
-    setXp(prev => {
-      const newXp = prev + earnedXp;
-      const nextLevelXp = level * 1000;
-      if (newXp >= nextLevelXp) {
-        setLevel(l => l + 1);
-        return newXp - nextLevelXp;
-      }
-      return newXp;
-    });
-
+  const updateHighScore = useCallback((game: string, score: number) => {
     if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
       lobbySocketRef.current.send(JSON.stringify({
         type: "HIGH_SCORE_UPDATE",
         game,
         score,
-        xp: earnedXp,
         playerId: persistentId
       }));
     }
-  };
+  }, [persistentId]);
 
-  const quickChat = (emoji: string) => {
+  const quickChat = useCallback((emoji: string) => {
     setChatInput(prev => prev + emoji);
-  };
+  }, []);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
-
-  const playSound = (freq: number, type: OscillatorType = "square", duration: number = 0.1) => {
+  const playSound = useCallback((freq: number, type: OscillatorType = "square", duration: number = 0.1) => {
     try {
       if (!audioCtxRef.current) {
         audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -332,11 +375,25 @@ export default function App() {
     } catch (e) {
       // Audio might be blocked
     }
-  };
+  }, []);
 
-  const connect = (mode: string) => {
-    setGameMode(mode as any);
-    setGameState("playing");
+  const connect = useCallback((mode: string) => {
+    if (mode === "block_blast") {
+      setGameMode("block_blast");
+      setGameState("playing");
+      return;
+    }
+    
+    // For online games, join matchmaking
+    setIsMatchmaking(true);
+    setMatchmakingMode(mode);
+    lobbySocketRef.current?.send(JSON.stringify({ type: "MATCHMAKING_JOIN", mode }));
+  }, []);
+
+  const cancelMatchmaking = () => {
+    setIsMatchmaking(false);
+    setMatchmakingMode(null);
+    lobbySocketRef.current?.send(JSON.stringify({ type: "MATCHMAKING_LEAVE" }));
   };
 
   const createPeer = (peerToId: string, myId: string, stream: MediaStream) => {
@@ -347,6 +404,10 @@ export default function App() {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
           { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
@@ -375,6 +436,10 @@ export default function App() {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
           { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
@@ -401,26 +466,105 @@ export default function App() {
       const audio = document.createElement("audio");
       audio.autoplay = true;
       audio.srcObject = stream;
+      if (selectedAudioOutputDevice && (audio as any).setSinkId) {
+        (audio as any).setSinkId(selectedAudioOutputDevice).catch(console.error);
+      }
       audioRefs.current[peerId] = audio;
       document.body.appendChild(audio);
+
+      // Setup speaking detection
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      const source = audioCtxRef.current.createMediaStreamSource(stream);
+      const analyzer = audioCtxRef.current.createAnalyser();
+      analyzer.fftSize = 512;
+      source.connect(analyzer);
+      analyzersRef.current[peerId] = analyzer;
+
+      const checkSpeaking = () => {
+        if (!analyzersRef.current[peerId]) return;
+        const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+        analyzer.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        
+        setSpeakingPeers(prev => {
+          const next = new Set(prev);
+          if (average > 30) {
+            next.add(peerId);
+          } else {
+            next.delete(peerId);
+          }
+          return next;
+        });
+        
+        if (peersRef.current[peerId]) requestAnimationFrame(checkSpeaking);
+      };
+      checkSpeaking();
     }
   };
 
+  const [isVoiceJoining, setIsVoiceJoining] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+
   const joinVoice = async (roomId: string = "public") => {
     try {
+      setVoiceError(null);
+      if (!window.isSecureContext) {
+        throw new Error("Voice chat requires a secure (HTTPS) connection. Please check your URL.");
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Your browser does not support voice chat or microphone access is restricted.");
+      }
+
+      setIsVoiceJoining(true);
       console.log(`[Voice] Requesting microphone access for room: ${roomId}`);
       const constraints = {
-        audio: selectedAudioDevice ? { deviceId: { exact: selectedAudioDevice } } : true
+        audio: {
+          deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
       };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       localStreamRef.current = stream;
+
+      // Local speaking detection
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      const source = audioCtxRef.current.createMediaStreamSource(stream);
+      const analyzer = audioCtxRef.current.createAnalyser();
+      analyzer.fftSize = 512;
+      source.connect(analyzer);
+      analyzersRef.current["local"] = analyzer;
+
+      const checkLocalSpeaking = () => {
+        if (!analyzersRef.current["local"]) return;
+        const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+        analyzer.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        
+        setSpeakingPeers(prev => {
+          const next = new Set(prev);
+          if (average > 30 && !isVoiceMuted) {
+            next.add("local");
+          } else {
+            next.delete("local");
+          }
+          return next;
+        });
+        
+        if (localStreamRef.current) requestAnimationFrame(checkLocalSpeaking);
+      };
+      checkLocalSpeaking();
+
       if (lobbySocketRef.current?.readyState === WebSocket.OPEN) {
         lobbySocketRef.current.send(JSON.stringify({ type: "VOICE_JOIN", roomId }));
       } else {
-        console.error("[Voice] Lobby socket not open");
+        throw new Error("Connection to server lost. Please refresh the page.");
       }
-    } catch (err) {
-      console.error("[Voice] Failed to get local stream", err);
+    } catch (err: any) {
+      console.error("[Voice] Failed to join voice", err);
+      setVoiceError(err.message || "Failed to access microphone.");
+      setIsVoiceJoining(false);
     }
   };
 
@@ -428,6 +572,7 @@ export default function App() {
     lobbySocketRef.current?.send(JSON.stringify({ type: "VOICE_LEAVE" }));
     setVoiceRoomId(null);
     setVoicePeers([]);
+    setSpeakingPeers(new Set());
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
       localStreamRef.current = null;
@@ -436,6 +581,11 @@ export default function App() {
     peersRef.current = {};
     Object.values(audioRefs.current).forEach(audio => audio.remove());
     audioRefs.current = {};
+    analyzersRef.current = {};
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(console.error);
+      audioCtxRef.current = null;
+    }
   };
 
   const toggleMute = () => {
@@ -482,14 +632,6 @@ export default function App() {
           ))}
         </div>
       </div>
-
-      {/* Offline Mode Indicator */}
-      {isOffline && (
-        <div className="fixed top-4 right-4 z-[200] bg-red-500/20 border border-red-500/50 px-4 py-2 rounded-full backdrop-blur-md flex items-center gap-2">
-          <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-          <span className="text-[10px] font-black uppercase tracking-widest text-red-500">Offline Mode</span>
-        </div>
-      )}
 
       {/* Persistent Voice Overlay */}
       {voiceRoomId && (
@@ -543,7 +685,7 @@ export default function App() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, scale: 1.05 }}
-            className="w-full max-w-6xl p-6 flex flex-col gap-8 z-10"
+            className="w-full max-w-7xl p-6 flex flex-col gap-8 z-10"
           >
             {/* Header Section */}
             <div className="flex flex-col md:flex-row items-center justify-between gap-8">
@@ -571,11 +713,11 @@ export default function App() {
 
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-4 bg-white/5 p-2 rounded-full border border-white/10 backdrop-blur-xl">
-                  <div className="flex items-center gap-3 px-6 py-3 bg-black/40 rounded-full border border-white/5">
-                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                  <div className="flex items-center gap-4 px-8 py-4 bg-black/40 rounded-full border border-white/10 shadow-2xl shadow-green-500/10">
+                    <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" />
                     <div>
-                      <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Players Online</p>
-                      <p className="text-sm font-black leading-none">{onlineCount}</p>
+                      <p className="text-[10px] font-black text-white/40 uppercase tracking-widest">Players Online</p>
+                      <p className="text-3xl font-black leading-none text-white">{onlineCount}</p>
                     </div>
                   </div>
                 </div>
@@ -600,40 +742,21 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-              {/* Left Column: Profile & Search */}
+              {/* Left Column: Profile & Party */}
               <div className="lg:col-span-3 space-y-6">
                 <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl relative overflow-hidden group">
                   <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
-                    <Settings className="w-24 h-24" />
+                    <User className="w-24 h-24" />
                   </div>
                   
                   <h3 className="text-[10px] font-black uppercase tracking-widest text-purple-500 mb-6 flex items-center gap-2">
                     <User className="w-4 h-4" />
-                    My Stats
+                    My Profile
                   </h3>
 
                   <div className="space-y-6 relative z-10">
-                    <div className="flex items-center gap-4 p-4 bg-black/40 rounded-2xl border border-white/5">
-                      <div className="w-12 h-12 bg-orange-500 rounded-xl flex items-center justify-center font-black text-xl italic shadow-lg shadow-orange-500/20">
-                        {level}
-                      </div>
-                      <div className="flex-1 space-y-1">
-                        <div className="flex justify-between text-[8px] font-black uppercase tracking-widest text-white/40">
-                          <span>Your Progress</span>
-                          <span>{xp} / {level * 1000} XP</span>
-                        </div>
-                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                          <motion.div 
-                            className="h-full bg-orange-500"
-                            initial={{ width: 0 }}
-                            animate={{ width: `${(xp / (level * 1000)) * 100}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
                     <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Your Name</label>
+                      <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Display Name</label>
                       <div className="relative">
                         <input
                           type="text"
@@ -641,132 +764,12 @@ export default function App() {
                           onChange={(e) => setPlayerNameInput(e.target.value)}
                           onBlur={() => setPlayerName(playerNameInput)}
                           onKeyDown={(e) => e.key === "Enter" && setPlayerName(playerNameInput)}
-                          placeholder="What should we call you?"
+                          placeholder="Your Name"
                           className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500 transition-all font-black uppercase italic text-lg tracking-tight placeholder:text-white/10"
                         />
                       </div>
                     </div>
-
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest ml-1">Find Friends</label>
-                      <div className="relative">
-                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/20" />
-                        <input
-                          type="text"
-                          value={searchQuery}
-                          onChange={(e) => searchPlayers(e.target.value)}
-                          placeholder="Search Players..."
-                          className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-3 focus:outline-none focus:border-blue-500 transition-all font-bold text-xs tracking-tight placeholder:text-white/10"
-                        />
-                      </div>
-                      
-                      <AnimatePresence>
-                        <motion.div 
-                          initial={{ opacity: 0, y: -10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -10 }}
-                          className="bg-black/60 border border-white/10 rounded-xl overflow-hidden divide-y divide-white/5"
-                        >
-                          {searchResults.length > 0 ? searchResults.map(p => (
-                            <div key={p.id} className="flex items-center justify-between p-3 hover:bg-white/5 transition-colors">
-                              <span className="font-bold text-xs">{p.name}</span>
-                              <button 
-                                onClick={() => invitePlayer(p.id)}
-                                className="p-1.5 bg-blue-500/20 hover:bg-blue-500 text-blue-500 hover:text-white rounded-lg transition-all"
-                              >
-                                <UserPlus className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          )) : (
-                            <div className="p-3 text-center text-white/20 text-[10px] font-bold uppercase tracking-widest">
-                              {searchQuery ? "No Players Found" : "No Players Online"}
-                            </div>
-                          )}
-                        </motion.div>
-                      </AnimatePresence>
-                    </div>
                   </div>
-                </div>
-
-                {/* Voice Chat Section */}
-                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl space-y-6">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 flex items-center gap-2">
-                      <Volume2 className="w-4 h-4" />
-                      Voice Chat
-                    </h3>
-                  </div>
-
-                  {!voiceRoomId ? (
-                    <div className="space-y-4">
-                      <button 
-                        onClick={() => joinVoice("public")}
-                        className="w-full py-4 bg-orange-500 hover:bg-orange-600 rounded-2xl font-black uppercase italic text-sm tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20"
-                      >
-                        <Mic className="w-5 h-5" />
-                        Join Public Room
-                      </button>
-                      
-                      <div className="relative group/voice">
-                        <input
-                          type="text"
-                          value={voiceRoomInput}
-                          onChange={(e) => setVoiceRoomInput(e.target.value)}
-                          placeholder="Private Code"
-                          className="w-full bg-black/60 border border-white/10 rounded-2xl px-4 py-3 pr-16 focus:outline-none focus:border-orange-500 transition-all font-black uppercase italic text-xs tracking-tight placeholder:text-white/10"
-                        />
-                        <button 
-                          onClick={() => voiceRoomInput && joinVoice(voiceRoomInput)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-xl font-black uppercase italic text-[10px] tracking-widest transition-all"
-                        >
-                          Join
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-4 bg-black/40 p-5 rounded-3xl border border-white/5 relative overflow-hidden">
-                      <div className="absolute top-0 right-0 p-4 opacity-5">
-                        <Volume2 className="w-16 h-16" />
-                      </div>
-                      
-                      <div className="flex items-center justify-between relative z-10">
-                        <div>
-                          <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Active Room</p>
-                          <p className="text-sm font-black uppercase italic text-orange-500 tracking-tight">{voiceRoomId}</p>
-                        </div>
-                        <div className="flex gap-2">
-                          <button 
-                            onClick={toggleMute}
-                            className={`p-3 rounded-xl transition-all ${isVoiceMuted ? 'bg-red-500/20 text-red-500 shadow-lg shadow-red-500/10' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
-                          >
-                            {isVoiceMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                          </button>
-                          <button 
-                            onClick={leaveVoice}
-                            className="p-3 bg-red-500/20 hover:bg-red-500/40 text-red-500 rounded-xl transition-all shadow-lg shadow-red-500/10"
-                          >
-                            <PhoneOff className="w-5 h-5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-3 relative z-10">
-                        <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Connected ({voicePeers.length + 1})</p>
-                        <div className="flex flex-wrap gap-2">
-                          <div className="px-3 py-1.5 bg-orange-500/20 rounded-xl border border-orange-500/30 flex items-center gap-2">
-                            <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
-                            <span className="text-[10px] font-black uppercase italic text-orange-500">You</span>
-                          </div>
-                          {voicePeers.map(peerId => (
-                            <div key={peerId} className="px-3 py-1.5 bg-white/5 rounded-xl border border-white/10 flex items-center gap-2">
-                              <div className="w-2 h-2 bg-green-500 rounded-full" />
-                              <span className="text-[10px] font-black uppercase italic text-white/60">Brawler</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
 
                 {/* Party Section */}
@@ -812,42 +815,12 @@ export default function App() {
                     )}
                   </div>
                 </div>
-                {/* Leaderboard Section */}
-                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl">
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-yellow-500 mb-6 flex items-center gap-2">
-                    <Trophy className="w-4 h-4" />
-                    Top Players
-                  </h3>
-                  <div className="space-y-3">
-                    {leaderboard.map((entry, i) => (
-                      <div key={i} className="flex items-center justify-between p-3 bg-black/40 rounded-xl border border-white/5">
-                        <div className="flex items-center gap-3">
-                          <span className="text-[10px] font-black text-white/20 w-4">{i + 1}</span>
-                          <div>
-                            <p className="text-xs font-bold">{entry.name}</p>
-                            <p className="text-[7px] font-black text-white/20 uppercase tracking-widest">Level {entry.level}</p>
-                          </div>
-                        </div>
-                        <span className="text-xs font-black italic text-yellow-500">{entry.score}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
               </div>
 
               {/* Middle Column: Game Modes */}
               <div className="lg:col-span-6 flex flex-col gap-6">
-                {/* Daily Challenge & Matchmaking */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-gradient-to-br from-purple-600/20 to-blue-600/20 border border-white/10 p-6 rounded-[2rem] backdrop-blur-xl relative overflow-hidden group">
-                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition-transform">
-                      <Zap className="w-16 h-16" />
-                    </div>
-                    <h4 className="text-[10px] font-black uppercase tracking-widest text-blue-400 mb-2">Today's Quest</h4>
-                    <p className="text-sm font-black uppercase italic mb-1">Score {dailyChallenge.goal} in {dailyChallenge.game.replace('_', ' ')}</p>
-                    <p className="text-[10px] text-white/40 font-bold uppercase tracking-widest">Reward: {dailyChallenge.reward} XP</p>
-                  </div>
-
+                {/* Matchmaking */}
+                <div className="grid grid-cols-1 gap-4">
                   <div className="bg-white/5 border border-white/10 p-6 rounded-[2rem] backdrop-blur-xl flex items-center justify-between">
                     <div>
                       <h4 className="text-[10px] font-black uppercase tracking-widest text-orange-500 mb-1">Quick Match</h4>
@@ -883,270 +856,305 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 relative z-10">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <div className="group relative bg-gradient-to-br from-cyan-500/80 to-blue-600/80 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-cyan-500/20">
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <LayoutGrid className="w-32 h-32" />
+                      </div>
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <LayoutGrid className="w-6 h-6 text-white" />
+                      </div>
+                      <h4 className="text-2xl font-black uppercase italic tracking-tighter mb-2">Block Blast</h4>
+                      <p className="text-white/70 text-xs font-medium leading-relaxed mb-6">Puzzle. Clear lines with neon blocks and score high.</p>
+                      <button 
+                        onClick={() => connect("block_blast")}
+                        className="w-full py-4 bg-cyan-500 hover:bg-cyan-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shadow-cyan-500/20"
+                      >
+                        Play Online
+                      </button>
+                    </div>
+
                     <motion.button
                       whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("neon_neon")}
-                      className="group relative bg-gradient-to-br from-orange-500 to-red-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-orange-500/20"
+                      onClick={() => connect("online_pong")}
+                      className="group relative bg-gradient-to-br from-orange-500 to-red-600 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-orange-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Target className="w-24 h-24" />
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <Zap className="w-32 h-32" />
                       </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Target className="w-5 h-5 text-white" />
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <Zap className="w-6 h-6 text-white" />
                       </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Neon Neon</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Reflex test. Click the targets before they vanish.</p>
+                      <h4 className="text-2xl font-black uppercase italic tracking-tighter mb-2">Online Pong</h4>
+                      <p className="text-white/70 text-xs font-medium leading-relaxed">Multiplayer. Compete with friends in real-time.</p>
                     </motion.button>
 
                     <motion.button
                       whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("grid_runner")}
-                      className="group relative bg-gradient-to-br from-blue-600 to-cyan-700 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-blue-500/20"
+                      onClick={() => connect("neon_duel")}
+                      className="group relative bg-gradient-to-br from-purple-500 to-indigo-600 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-purple-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Square className="w-24 h-24" />
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <Target className="w-32 h-32" />
                       </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Zap className="w-5 h-5 text-white" />
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <Target className="w-6 h-6 text-white" />
                       </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Grid Runner</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Survival. Dodge the falling red blocks.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("synth_wave")}
-                      className="group relative bg-gradient-to-br from-purple-600 to-indigo-800 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-purple-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Music className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Music className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Synth Wave</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Rhythm. Tap the notes to the beat.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("pixel_jump")}
-                      className="group relative bg-gradient-to-br from-yellow-500 to-orange-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-yellow-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <ArrowUp className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <ArrowUp className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Pixel Jump</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Platformer. Jump higher and higher.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("void_dash")}
-                      className="group relative bg-gradient-to-br from-gray-800 to-black p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-black/50 border border-white/5"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <ChevronRight className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center mb-3">
-                        <Zap className="w-5 h-5 text-cyan-500" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Void Dash</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Side-scroller. Avoid the neon pillars.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("block_blast")}
-                      className="group relative bg-gradient-to-br from-cyan-500/80 to-blue-600/80 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-cyan-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <LayoutGrid className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <LayoutGrid className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Block Blast</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Puzzle. Clear lines with neon blocks.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("neon_snake")}
-                      className="group relative bg-gradient-to-br from-green-500 to-emerald-700 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-green-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Zap className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Zap className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Neon Snake</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Classic. Eat to grow, don't hit the walls.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("color_match")}
-                      className="group relative bg-gradient-to-br from-blue-500 to-indigo-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-blue-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Target className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Target className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Color Match</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Reflex. Match the color, not the word.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("memory_grid")}
-                      className="group relative bg-gradient-to-br from-purple-500 to-pink-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-purple-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <LayoutGrid className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <LayoutGrid className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Memory Grid</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Brain. Remember the glowing pattern.</p>
+                      <h4 className="text-2xl font-black uppercase italic tracking-tighter mb-2">Neon Duel</h4>
+                      <p className="text-white/70 text-xs font-medium leading-relaxed">1v1 Shooter. Outplay your opponent in a neon arena.</p>
                     </motion.button>
 
                     <motion.button
                       whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => connect("speed_typer")}
-                      className="group relative bg-gradient-to-br from-cyan-500 to-blue-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-cyan-500/20"
+                      className="group relative bg-gradient-to-br from-green-500 to-emerald-600 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-green-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <MessageSquare className="w-24 h-24" />
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <MessageSquare className="w-32 h-32" />
                       </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <MessageSquare className="w-5 h-5 text-white" />
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <MessageSquare className="w-6 h-6 text-white" />
                       </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Speed Typer</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Skill. Type the words as fast as you can.</p>
+                      <h4 className="text-2xl font-black uppercase italic tracking-tighter mb-2">Speed Typer</h4>
+                      <p className="text-white/70 text-xs font-medium leading-relaxed">Typing Race. Be the fastest to type the words.</p>
                     </motion.button>
 
                     <motion.button
                       whileHover={{ scale: 1.02, y: -2 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("circle_survive")}
-                      className="group relative bg-gradient-to-br from-yellow-500 to-orange-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-yellow-500/20"
+                      onClick={() => connect("grid_race")}
+                      className="group relative bg-gradient-to-br from-pink-500 to-rose-600 p-8 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-2xl shadow-pink-500/20"
                     >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Target className="w-24 h-24" />
+                      <div className="absolute top-0 right-0 p-6 opacity-20">
+                        <ArrowRight className="w-32 h-32" />
                       </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Target className="w-5 h-5 text-white" />
+                      <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                        <Zap className="w-6 h-6 text-white" />
                       </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Circle Survive</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Precision. Stay inside the moving ring.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("gravity_ball")}
-                      className="group relative bg-gradient-to-br from-pink-500 to-rose-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-pink-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <ArrowUp className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <ArrowUp className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Gravity Ball</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Control. Navigate the ball through obstacles.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("neon_paddle")}
-                      className="group relative bg-gradient-to-br from-cyan-400 to-blue-500 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-cyan-400/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Square className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Square className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Neon Paddle</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Arcade. Classic paddle survival.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("hex_escape")}
-                      className="group relative bg-gradient-to-br from-red-500 to-orange-700 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-red-500/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Target className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Target className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Hex Escape</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Dodge. Escape the closing hexagons.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("bit_drifter")}
-                      className="group relative bg-gradient-to-br from-blue-400 to-indigo-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-blue-400/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Zap className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Zap className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Bit Drifter</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Racing. Dodge traffic at high speed.</p>
-                    </motion.button>
-
-                    <motion.button
-                      whileHover={{ scale: 1.02, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => connect("pulse_wave")}
-                      className="group relative bg-gradient-to-br from-green-400 to-emerald-600 p-6 rounded-[2rem] transition-all text-left overflow-hidden shadow-2xl shadow-green-400/20"
-                    >
-                      <div className="absolute top-0 right-0 p-4 opacity-20">
-                        <Target className="w-24 h-24" />
-                      </div>
-                      <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center mb-3">
-                        <Target className="w-5 h-5 text-white" />
-                      </div>
-                      <h4 className="text-xl font-black uppercase italic tracking-tighter mb-1">Pulse Wave</h4>
-                      <p className="text-white/70 text-[10px] font-medium leading-tight">Rhythm. Tap when the pulse matches.</p>
+                      <h4 className="text-2xl font-black uppercase italic tracking-tighter mb-2">Grid Race</h4>
+                      <p className="text-white/70 text-xs font-medium leading-relaxed">Endless Runner. Outlast your opponent on the grid.</p>
                     </motion.button>
                   </div>
                 </div>
               </div>
 
-              {/* Right Column: Chat */}
+              {/* Right Column: Voice & Chat */}
               <div className="lg:col-span-3 flex flex-col gap-6">
+                {/* Voice Chat Section */}
+                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl space-y-6">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-orange-500 flex items-center gap-2">
+                      <Volume2 className="w-4 h-4" />
+                      Voice Chat
+                    </h3>
+                  </div>
+
+                  {!voiceRoomId ? (
+                    <div className="space-y-4">
+                      {/* Integrated Audio Controls */}
+                      <div className="grid grid-cols-2 gap-3 mb-4">
+                        <div className="space-y-1.5">
+                          <label className="text-[7px] font-black text-white/30 uppercase tracking-widest flex items-center gap-1.5">
+                            <Mic className="w-2.5 h-2.5" />
+                            Mic
+                          </label>
+                          <select 
+                            value={selectedAudioDevice}
+                            onChange={(e) => setSelectedAudioDevice(e.target.value)}
+                            className="w-full bg-black/40 border border-white/5 rounded-xl px-2.5 py-2 focus:outline-none focus:border-orange-500/50 transition-all font-bold text-[9px] text-white/60"
+                          >
+                            {audioDevices.map(device => (
+                              <option key={device.deviceId} value={device.deviceId}>
+                                {device.label || `Mic ${device.deviceId.slice(0, 5)}`}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[7px] font-black text-white/30 uppercase tracking-widest flex items-center gap-1.5">
+                            <Volume2 className="w-2.5 h-2.5" />
+                            Out
+                          </label>
+                          <select 
+                            value={selectedAudioOutputDevice}
+                            onChange={(e) => setSelectedAudioOutputDevice(e.target.value)}
+                            className="w-full bg-black/40 border border-white/5 rounded-xl px-2.5 py-2 focus:outline-none focus:border-orange-500/50 transition-all font-bold text-[9px] text-white/60"
+                          >
+                            {audioOutputDevices.length > 0 ? audioOutputDevices.map(device => (
+                              <option key={device.deviceId} value={device.deviceId}>
+                                {device.label || `Speaker ${device.deviceId.slice(0, 5)}`}
+                              </option>
+                            )) : (
+                              <option value="">Default</option>
+                            )}
+                          </select>
+                        </div>
+                      </div>
+
+                      {voiceError && (
+                        <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl mb-4">
+                          <p className="text-[10px] font-bold text-red-500 uppercase tracking-widest leading-tight">{voiceError}</p>
+                        </div>
+                      )}
+
+                      <button 
+                        disabled={isVoiceJoining}
+                        onClick={() => joinVoice("public")}
+                        className={`w-full py-4 rounded-2xl font-black uppercase italic text-sm tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg ${isVoiceJoining ? 'bg-orange-500/50 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600 shadow-orange-500/20'}`}
+                      >
+                        {isVoiceJoining ? (
+                          <motion.div
+                            animate={{ rotate: 360 }}
+                            transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                          >
+                            <Zap className="w-5 h-5" />
+                          </motion.div>
+                        ) : (
+                          <Mic className="w-5 h-5" />
+                        )}
+                        {isVoiceJoining ? "Joining..." : "Join Public"}
+                      </button>
+                      
+                      <div className="relative group/voice">
+                        <input
+                          type="text"
+                          value={voiceRoomInput}
+                          onChange={(e) => setVoiceRoomInput(e.target.value)}
+                          placeholder="Private Code"
+                          className="w-full bg-black/60 border border-white/10 rounded-2xl px-4 py-3 pr-16 focus:outline-none focus:border-orange-500 transition-all font-black uppercase italic text-xs tracking-tight placeholder:text-white/10"
+                        />
+                        <button 
+                          disabled={!voiceRoomInput || isVoiceJoining}
+                          onClick={() => joinVoice(voiceRoomInput)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl font-black uppercase italic text-[10px] tracking-widest transition-all"
+                        >
+                          Join
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4 bg-black/40 p-5 rounded-3xl border border-white/5 relative overflow-hidden">
+                      <div className="absolute top-0 right-0 p-4 opacity-5">
+                        <Volume2 className="w-16 h-16" />
+                      </div>
+                      
+                      <div className="flex items-center justify-between relative z-10">
+                        <div>
+                          <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Active Room</p>
+                          <p className="text-sm font-black uppercase italic text-orange-500 tracking-tight">{voiceRoomId}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={toggleMute}
+                            className={`p-3 rounded-xl transition-all ${isVoiceMuted ? 'bg-red-500/20 text-red-500 shadow-lg shadow-red-500/10' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
+                          >
+                            {isVoiceMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                          </button>
+                          <button 
+                            onClick={leaveVoice}
+                            className="p-3 bg-red-500/20 hover:bg-red-500/40 text-red-500 rounded-xl transition-all shadow-lg shadow-red-500/10"
+                          >
+                            <PhoneOff className="w-5 h-5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 relative z-10">
+                        <p className="text-[8px] font-black text-white/40 uppercase tracking-widest">Connected ({voicePeers.length + 1})</p>
+                        <div className="flex flex-wrap gap-2">
+                          <div className={`px-3 py-1.5 rounded-xl border transition-all flex items-center gap-2 ${speakingPeers.has("local") ? 'bg-green-500/20 border-green-500/50 shadow-lg shadow-green-500/10' : 'bg-orange-500/10 border-orange-500/20'}`}>
+                            <div className={`w-2 h-2 rounded-full ${speakingPeers.has("local") ? 'bg-green-500 animate-pulse' : 'bg-orange-500'}`} />
+                            <div className="flex flex-col">
+                              <span className={`text-[10px] font-black uppercase italic ${speakingPeers.has("local") ? 'text-green-500' : 'text-orange-500'}`}>You</span>
+                              <VoiceVisualizer analyzer={analyzersRef.current["local"]} isMuted={isVoiceMuted} />
+                            </div>
+                          </div>
+                          {voicePeers.map(peerId => (
+                            <div key={peerId} className={`px-3 py-1.5 rounded-xl border transition-all flex items-center gap-2 ${speakingPeers.has(peerId) ? 'bg-green-500/20 border-green-500/50 shadow-lg shadow-green-500/10' : 'bg-white/5 border-white/10'}`}>
+                              <div className={`w-2 h-2 rounded-full ${speakingPeers.has(peerId) ? 'bg-green-500 animate-pulse' : 'bg-white/40'}`} />
+                              <div className="flex flex-col">
+                                <span className={`text-[10px] font-black uppercase italic ${speakingPeers.has(peerId) ? 'text-green-500' : 'text-white/60'}`}>Brawler_{peerId.slice(0, 4)}</span>
+                                <VoiceVisualizer analyzer={analyzersRef.current[peerId]} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Leaderboard Section */}
+                <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-yellow-500 mb-6 flex items-center gap-2">
+                    <Trophy className="w-4 h-4" />
+                    Top Players
+                  </h3>
+                  <div className="space-y-3">
+                    {leaderboard.map((entry, i) => (
+                      <div key={i} className="flex items-center justify-between p-3 bg-black/40 rounded-xl border border-white/5">
+                        <div className="flex items-center gap-3">
+                          <span className="text-[10px] font-black text-white/20 w-4">{i + 1}</span>
+                          <div>
+                            <p className="text-xs font-bold">{entry.name}</p>
+                          </div>
+                        </div>
+                        <span className="text-xs font-black italic text-yellow-500">{entry.score}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Search & Chat Section */}
                 <div className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl flex-1 flex flex-col overflow-hidden">
-                  <h3 className="text-[10px] font-black uppercase tracking-widest text-green-400 mb-6 flex items-center gap-2">
+                  <div className="space-y-4 mb-6">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-blue-400 flex items-center gap-2">
+                      <Search className="w-4 h-4" />
+                      Social
+                    </h3>
+                    <div className="relative">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-3 h-3 text-white/20" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => searchPlayers(e.target.value)}
+                        placeholder="Find Players..."
+                        className="w-full bg-black/40 border border-white/10 rounded-xl pl-9 pr-4 py-2 focus:outline-none focus:border-blue-500 transition-all font-bold text-[10px] tracking-tight placeholder:text-white/10"
+                      />
+                    </div>
+                    
+                    <AnimatePresence>
+                      {searchQuery && (
+                        <motion.div 
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="bg-black/60 border border-white/10 rounded-xl overflow-hidden divide-y divide-white/5"
+                        >
+                          {searchResults.length > 0 ? searchResults.map(p => (
+                            <div key={p.id} className="flex items-center justify-between p-2 hover:bg-white/5 transition-colors">
+                              <span className="font-bold text-[10px]">{p.name}</span>
+                              <button 
+                                onClick={() => invitePlayer(p.id)}
+                                className="p-1.5 bg-blue-500/20 hover:bg-blue-500 text-blue-500 hover:text-white rounded-lg transition-all"
+                              >
+                                <UserPlus className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )) : (
+                            <div className="p-2 text-center text-white/20 text-[8px] font-bold uppercase tracking-widest">
+                              No Players Found
+                            </div>
+                          )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-green-400 mb-4 flex items-center gap-2">
                     <MessageSquare className="w-4 h-4" />
                     Community Chat
                   </h3>
@@ -1252,22 +1260,94 @@ export default function App() {
             animate={{ opacity: 1 }}
             className="relative w-full h-full flex items-center justify-center"
           >
-            {gameMode === "neon_neon" && <NeonNeon onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("neon_neon", s, Math.floor(s/10))} />}
-            {gameMode === "grid_runner" && <GridRunner onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("grid_runner", s, Math.floor(s/5))} />}
-            {gameMode === "synth_wave" && <SynthWave onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("synth_wave", s, Math.floor(s/2))} />}
-            {gameMode === "pixel_jump" && <PixelJump onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("pixel_jump", s, Math.floor(s/1))} />}
-            {gameMode === "void_dash" && <VoidDash onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("void_dash", s, Math.floor(s/10))} />}
-            {gameMode === "block_blast" && <BlockBlast onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("block_blast", s, Math.floor(s/1))} />}
-            {gameMode === "neon_snake" && <NeonSnake onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("neon_snake", s, Math.floor(s/1))} />}
-            {gameMode === "color_match" && <ColorMatch onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("color_match", s, Math.floor(s/1))} />}
-            {gameMode === "memory_grid" && <MemoryGrid onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("memory_grid", s, Math.floor(s/1))} />}
-            {gameMode === "speed_typer" && <SpeedTyper onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("speed_typer", s, Math.floor(s/1))} />}
-            {gameMode === "circle_survive" && <CircleSurvive onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("circle_survive", s, Math.floor(s/1))} />}
-            {gameMode === "gravity_ball" && <GravityBall onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("gravity_ball", s, Math.floor(s/1))} />}
-            {gameMode === "neon_paddle" && <NeonPaddle onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("neon_paddle", s, Math.floor(s/1))} />}
-            {gameMode === "hex_escape" && <HexEscape onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("hex_escape", s, Math.floor(s/1))} />}
-            {gameMode === "bit_drifter" && <BitDrifter onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("bit_drifter", s, Math.floor(s/1))} />}
-            {gameMode === "pulse_wave" && <PulseWave onExit={() => setGameState("lobby")} onScoreUpdate={(s) => updateHighScore("pulse_wave", s, Math.floor(s/1))} />}
+            {gameMode === "block_blast" && (
+              <BlockBlast 
+                onExit={() => setGameState("lobby")} 
+                onScoreUpdate={(s) => updateHighScore("block_blast", s)} 
+                socket={roomId ? lobbySocketRef.current : null}
+                playerId={persistentId}
+                roomId={roomId}
+                isHost={isPongHost}
+                opponentName={opponentName}
+              />
+            )}
+            {gameMode === "online_pong" && (
+              <OnlinePong 
+                onExit={() => setGameState("lobby")} 
+                onScoreUpdate={(s) => updateHighScore("online_pong", s)} 
+                socket={lobbySocketRef.current}
+                playerId={persistentId}
+                roomId={roomId || "public"}
+                isHost={isPongHost}
+              />
+            )}
+            {gameMode === "neon_duel" && (
+              <NeonDuel 
+                onExit={() => setGameState("lobby")} 
+                onScoreUpdate={(s) => updateHighScore("neon_duel", s)} 
+                socket={lobbySocketRef.current}
+                playerId={persistentId}
+                roomId={roomId}
+                isHost={isPongHost}
+              />
+            )}
+            {gameMode === "speed_typer" && (
+              <SpeedTyperDuel 
+                onExit={() => setGameState("lobby")} 
+                onScoreUpdate={(s) => updateHighScore("speed_typer", s)} 
+                socket={lobbySocketRef.current}
+                playerId={persistentId}
+                roomId={roomId}
+                isHost={isPongHost}
+                opponentName={opponentName}
+              />
+            )}
+            {gameMode === "grid_race" && (
+              <GridRace 
+                onExit={() => setGameState("lobby")} 
+                onScoreUpdate={(s) => updateHighScore("grid_race", s)} 
+                socket={lobbySocketRef.current}
+                playerId={persistentId}
+                roomId={roomId}
+                isHost={isPongHost}
+                opponentName={opponentName}
+              />
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Matchmaking Overlay */}
+      <AnimatePresence>
+        {isMatchmaking && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] flex items-center justify-center bg-black/90 backdrop-blur-3xl"
+          >
+            <div className="text-center space-y-8">
+              <div className="relative">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
+                  className="w-32 h-32 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full mx-auto"
+                />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Loader2 className="w-12 h-12 text-cyan-500 animate-pulse" />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-4xl font-black uppercase italic tracking-tighter text-white">Finding Match...</h2>
+                <p className="text-white/40 font-bold uppercase tracking-widest text-[10px]">Mode: {matchmakingMode?.replace('_', ' ')}</p>
+              </div>
+              <button
+                onClick={cancelMatchmaking}
+                className="px-8 py-4 bg-white/5 hover:bg-red-500/20 text-white/60 hover:text-red-500 border border-white/10 rounded-2xl font-black uppercase italic text-xs transition-all"
+              >
+                Cancel Matchmaking
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1296,21 +1376,6 @@ export default function App() {
               <h2 className="text-3xl font-black uppercase italic tracking-tighter text-white mb-8">Preferences</h2>
 
               <div className="space-y-8">
-                <div className="space-y-4">
-                  <label className="text-[10px] font-black text-white/40 uppercase tracking-widest">Microphone Selection</label>
-                  <select 
-                    value={selectedAudioDevice}
-                    onChange={(e) => setSelectedAudioDevice(e.target.value)}
-                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500 transition-all font-bold text-xs"
-                  >
-                    {audioDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>
-                        {device.label || `Microphone ${device.deviceId.slice(0, 5)}`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
                 <div className="space-y-4">
                   <label className="text-[10px] font-black text-white/40 uppercase tracking-widest">Interface Color</label>
                   <div className="flex gap-3">

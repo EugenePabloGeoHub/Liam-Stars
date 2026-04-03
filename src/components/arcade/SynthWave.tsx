@@ -24,11 +24,6 @@ export const SynthWave = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
           const missed = next.find(n => n.y > 100);
           if (missed) {
             setIsPlaying(false);
-            onScoreUpdate(score);
-            if (score > highScore) {
-              setHighScore(score);
-              localStorage.setItem('synth_high_score', score.toString());
-            }
             return [];
           }
           return next;
@@ -64,6 +59,16 @@ export const SynthWave = ({ onExit, onScoreUpdate }: { onExit: () => void, onSco
       setScore(s => Math.max(0, s - 50));
     }
   };
+
+  useEffect(() => {
+    if (!isPlaying && score > 0) {
+      onScoreUpdate(score);
+      if (score > highScore) {
+        setHighScore(score);
+        localStorage.setItem('synth_high_score', score.toString());
+      }
+    }
+  }, [isPlaying, score, highScore, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);

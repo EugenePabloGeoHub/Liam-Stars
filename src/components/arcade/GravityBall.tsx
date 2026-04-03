@@ -40,7 +40,6 @@ export const GravityBall = ({ onExit, onScoreUpdate }: { onExit: () => void, onS
       if (collision) {
         setGameOver(true);
         setIsPlaying(false);
-        onScoreUpdate(score);
         return prev;
       }
 
@@ -80,6 +79,12 @@ export const GravityBall = ({ onExit, onScoreUpdate }: { onExit: () => void, onS
       window.removeEventListener('keyup', handleKeyUp);
     };
   }, []);
+
+  useEffect(() => {
+    if (gameOver && score > 0) {
+      onScoreUpdate(score);
+    }
+  }, [gameOver, score, onScoreUpdate]);
 
   const startGame = () => {
     setScore(0);
