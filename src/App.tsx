@@ -25,11 +25,6 @@ import * as LucideIcons from "lucide-react";
 import * as Motion from "motion/react";
 import { io, Socket } from "socket.io-client";
 
-// Polyfill for simple-peer
-if (typeof window !== "undefined") {
-  window.Buffer = Buffer;
-}
-
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 // Error Boundary for Firestore and Runtime Errors
@@ -513,7 +508,17 @@ export default function App() {
 
   // Initialize Socket.io
   useEffect(() => {
-    const socket = io();
+    // If we are on GitHub Pages, we need to connect to the Render backend.
+    // Otherwise, we connect to the current host.
+    const isGitHubPages = window.location.hostname.includes("github.io");
+    const backendUrl = isGitHubPages ? "https://your-render-app.onrender.com" : window.location.origin;
+    
+    // Note: The user should replace the URL above with their actual Render URL.
+    const socket = io(backendUrl, {
+      transports: ["websocket", "polling"],
+      reconnectionAttempts: 5,
+      timeout: 10000
+    });
     socketRef.current = socket;
 
     socket.on("connect", () => {
